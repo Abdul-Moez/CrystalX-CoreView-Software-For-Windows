@@ -541,6 +541,16 @@ Two details that matter:
 - **The task is built with PowerShell's `Register-ScheduledTask`, not
   `schtasks /create`**, which caps the command at 261 characters and so failed
   for long folder paths.
+- **Python 3.13.0 breaks the hidden start.** In a venv made by 3.13.0,
+  `Scripts\pythonw.exe` launches the console `python.exe` instead of
+  `pythonw.exe` ([CPython #126084](https://github.com/python/cpython/issues/126084),
+  fixed in 3.13.1). At login a black console window appeared, and clicking
+  into it put it in QuickEdit "Select" mode, which **blocks the process at its
+  next `print()`** — before the port was opened, so the panel stayed black.
+  Pressing Esc released it. Checked side by side on the test machine: a 3.13.5
+  venv's `pythonw.exe` starts `pythonw.exe`; a 3.13.0 one starts `python.exe`.
+  `setup.cmd` therefore refuses 3.13.0, both for creating `venv-win` and for
+  reusing one.
 
 `autostart-on.cmd` also offers to disable LCD Control's own login task
 (`LCD ControlPowerBoot`), since only one program can hold the COM port.

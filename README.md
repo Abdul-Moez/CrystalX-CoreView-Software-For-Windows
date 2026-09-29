@@ -24,8 +24,9 @@ the makers of LCD Control.
 - **A CrystalX CoreView V-950 case**, with the LCD's USB cable plugged into the
   motherboard, as it comes from the factory.
 - **Windows 10 or 11**, 64-bit.
-- **Python 3.10 or newer.** Step 1 below shows how to install it. Tested with
-  Python 3.13.
+- **Python 3.10 or newer — but not 3.13.0**, which has a bug that opens a
+  black window when the clock starts with Windows. Step 1 below shows how to
+  install it. Tested with Python 3.13.5.
 - **An internet connection**, only during setup.
 - **For the CPU temperature only: PawnIO 2.2.0**, a free driver, installed once
   from **https://pawnio.eu/** — see [Step 4](#step-4--install-pawnio-for-cpu-temperature).
@@ -39,7 +40,8 @@ You only do this once. It takes about five minutes.
 
 ### Step 1 — Install Python
 
-Skip this step if you already have Python 3.10 or newer.
+Skip this step if you already have Python 3.10 or newer (other than 3.13.0 —
+`setup.cmd` tells you if yours won't work).
 
 1. Go to **https://www.python.org/downloads/windows/** and download the latest
    **Windows installer (64-bit)**.
@@ -258,6 +260,17 @@ and anything larger comes out scrambled.
 **"Python 3.10 or newer was not found"** (from `setup.cmd`)
 Python isn't installed, or "Add python.exe to PATH" wasn't ticked. Do
 [Step 1](#step-1--install-python) again, then run `setup.cmd` again.
+
+**"Python 3.13.0 was found, but it has a bug…"** or **"The venv-win folder
+was made with Python 3.13.0…"** (from `setup.cmd`)
+Install the latest Python from python.org, delete the `venv-win` folder if the
+message says so, and run `setup.cmd` again.
+
+**A black window appears at login, and the screen stays black**
+Your `venv-win` was made with Python 3.13.0 (see the message above). Clicking
+into that window pauses the clock — press **Esc** to get it going again, then
+fix it for good by installing a newer Python, deleting `venv-win` and running
+`setup.cmd` again.
 
 **"venv-win is missing. Double-click setup.cmd first."**
 Setup hasn't been run in this folder yet. Do [Step 3](#step-3--run-setup).

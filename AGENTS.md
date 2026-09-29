@@ -79,6 +79,9 @@ too.
 - Python libraries are pinned to exact versions in `requirements.txt`;
   `setup.cmd` installs them into `venv-win/`. Add new libraries there with an
   exact version. Never commit `venv-win/`.
+- **Never use Python 3.13.0.** Its venv `pythonw.exe` opens a console window
+  (CPython #126084), which breaks the hidden autostart. `setup.cmd` refuses it;
+  keep that check. The maintainer's `venv-win` uses Python 3.13.5.
 - **PawnIO** (needed for the CPU temperature) is a kernel driver. It is **not**
   bundled in the repo; the README names the version and links to
   https://pawnio.eu/. Keep it that way.
