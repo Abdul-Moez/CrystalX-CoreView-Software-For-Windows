@@ -1,0 +1,529 @@
+# How it works
+
+The technical side of this project: how the panel is driven, the hardware limits
+that were found by trial and error, how each reading is measured, and what did
+not work. **If you just want the screen running, go back to the
+[README](../README.md).**
+
+**Read this before changing any code.** The panel has several undocumented
+quirks. They are written down so nobody has to rediscover them.
+
+- [Hardware](#hardware)
+- [The protocol](#the-protocol)
+- [What the panel does on its own](#what-the-panel-does-on-its-own)
+- [Things that must not change](#things-that-must-not-change)
+- [Things that are safe to change](#things-that-are-safe-to-change)
+- [Why a COM port is all it takes](#why-a-com-port-is-all-it-takes)
+- [What the vendor app revealed](#what-the-vendor-app-revealed)
+- [Files](#files)
+- [Command-line options](#command-line-options)
+- [Stats slots](#stats-slots)
+- [Temperatures (planned)](#temperatures-planned)
+- [Performance](#performance)
+- [Approaches that did not work](#approaches-that-did-not-work)
+
+---
+
+## Hardware
+
+| | |
+|---|---|
+| Device | `33c3:f101` — "HL VMAX", sold as CrystalX CoreView V-950 |
+| USB name | `HL-VMAX-USB-Device`, firmware revision 1.30 (`REV_0130`) |
+| Vendor software | `lcd.crystalx.io` — LCD Control (Windows only, .NET/WPF, by SOEYI Technology / Hailian Zhixin) |
+| Panel | 480 × 1920, portrait, mounted **upside down** in the case |
+| Enumerates as | CDC-ACM composite → `USB Serial Device (COMx)` via `usbser.sys` |
+| Transport | writes to that COM port = USB bulk, interface 1, endpoint `0x02` |
+
+---
+
+## The protocol
+
+Each frame is a plain JPEG with a 12-byte header, written to the port. There is
+no handshake and no authentication, and the panel never acknowledges a frame.
+
+The panel is not completely silent, though: the vendor app asks it for a serial
+number when it connects, and the panel answers. The request bytes are unknown
+(see [What the vendor app revealed](#what-the-vendor-app-revealed)). Displaying
+frames does not need it, so our scripts never ask and discard anything the
+panel sends.
+
+### The 12-byte header
+
+Little-endian, prepended to every JPEG:
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| `0x00` | 4 | magic | `0x0008100A` |
+| `0x04` | 2 | width | width of the JPEG being sent |
+| `0x06` | 2 | height | height of the JPEG being sent |
+| `0x08` | 2 | stride | `0` |
+| `0x0A` | 2 | flag | `1` |
+
+Width and height describe **the image you are sending**, not the panel.
+
+In Python: `struct.pack("<IHHHH", 0x0008100A, w, h, 0, 1)`
+
+### Sending a frame
+
+1. Find the COM port by `VID:PID=33C3:F101`
+2. Open it with **all flow control off**
+3. Write `header + jpeg_bytes`
+4. Repeat, forever
+
+---
+
+## What the panel does on its own
+
+**The "Welcome" screen at power-on comes from the panel's own firmware.** The
+panel is powered over USB as soon as the PC turns on, shows its built-in
+Welcome image and waits for a program to start streaming frames. If nothing
+arrives, it switches itself off after a while. It also goes blank shortly after
+frames stop (see constraint 4).
+
+**The Welcome image and the timeout cannot be changed from software**, as far
+as anyone has found. The vendor app has no command for either (see below), so
+they are fixed in the firmware. The only thing you can do is start streaming
+earlier — the README's autostart section makes the clock take over at login.
+Nothing can run before Windows starts, so Welcome always shows briefly.
+
+---
+
+## Things that must not change
+
+These were each found the hard way. Changing any of them breaks the display in
+ways that look like random corruption and are very hard to diagnose.
+
+The first four are properties of the **panel** itself. The rest are about how
+Windows and Python talk to it.
+
+### 1. Images are rotated 180° before encoding
+
+The panel is physically mounted upside down. Every frame goes through
+`transpose(Image.ROTATE_180)` **before** being encoded to JPEG. The panel does
+not do this for you.
+
+### 2. Never send more than ~472,000 pixels per frame
+
+This is the single most important constraint and the least obvious.
+
+"Pixels" means width × height of the frame being sent — the total number of
+dots in the picture. The panel is 480 × 1920 (921,600 px), but **it cannot
+decode a frame that large**. Sending a full-panel image produces a flickering,
+torn, scrambled mess.
+
+Measured on this hardware:
+
+| Size | Pixels | Result |
+|---|---|---|
+| 234 × 1079 | 252,486 | clean |
+| 300 × 1383 | 414,900 | clean |
+| 320 × 1476 | 472,320 | clean — **what we use, and the maximum** |
+| 324 × 1494 | 484,056 | corrupt |
+| 328 × 1512 | 495,936 | corrupt |
+| 332 × 1531 | 508,292 | corrupt |
+| 334 × 1540 | 514,360 | corrupt |
+| 480 × 1920 | 921,600 | badly corrupt |
+
+The ceiling lies somewhere between **472,320 (clean) and 484,056 (corrupt)**.
+For the rooftop GIF that makes **320 px the widest usable width** — the height
+follows the width to keep the GIF's shape, so even 4 px wider already breaks.
+Widths 321–323 were not tested; they would gain at most 3 px, which is not
+worth it.
+
+The 324–332 rows were measured on 2026-09-29, after this section had claimed a
+~500k limit. The method: a labelled test pattern (grid, corner-to-corner
+diagonals, coloured corners, numbered bands, with the size printed on it) cycled
+through 320/324/328/332/334 on the real panel while someone watched and reported
+which looked right. Only 320 was clean. **Do not repeat this experiment hoping
+for more width — it has been done.**
+
+> **Known gap:** `MAX_PIXELS = 500_000` in `lcd_win.py` was set before the
+> 324–332 rows were measured, so it is looser than the real ceiling. The scripts
+> refuse to run above 500,000 px, but **widths 324–329 pass that check and still
+> show a scrambled screen.** Treat 320 as the maximum regardless of what the
+> check allows. Lowering `MAX_PIXELS` to about `475_000` would close the gap.
+> **Never raise it.**
+
+### 3. The panel does not scale images up
+
+A smaller image is displayed at its actual size, centred, with the rest of the
+panel black. This is why we use 320 × 1476 — the largest image that both fits
+under the pixel limit and looks reasonably large on the panel.
+
+Because the source GIF is 234 × 1079 (aspect 1 : 4.61) and the panel is 1 : 4,
+the image can never fill the panel completely without cropping or distorting it.
+
+### 4. The panel needs a continuous stream
+
+**A single frame flashes and disappears.** This cost a debugging round: the
+first test wrote one frame, the port closed, and the panel went blank within a
+second. It was not a transport failure — the frame arrived and was displayed.
+
+The panel blanks shortly after writes stop. `lcd_win.py` and `clock_win.py`
+both loop forever for this reason. `--once` exists only for diagnostics.
+
+### 5. Flow control must be off
+
+Frames are binary JPEG. Software flow control would eat any `0x11` or `0x13`
+byte in the stream, and hardware flow control would stall forever on a device
+that drives none of those lines. `Panel.__init__` sets `xonxoff=False`,
+`rtscts=False`, `dsrdtr=False` explicitly. **Do not remove them.**
+
+The line rate (115200) is ignored — there is no real UART behind a CDC ACM
+endpoint — but Windows requires a valid value.
+
+### 6. The port is found by VID:PID, never by number
+
+Windows assigns COM numbers per physical USB port, so the panel moves from COM5
+to something else the moment it is plugged into a different header.
+`find_port()` locates it by `VID:PID=33C3:F101`. Pass `--port COMx` to override.
+
+### 7. Only one process may drive the panel at a time
+
+Opening the port fails with "Access is denied" if something else holds it. Stop
+the vendor app, the autostart task or any other running copy before starting a
+script by hand.
+
+### 8. Use `%#I`, not `%-I`, to drop leading zeros
+
+`TIME_FMT` and `DATE_FMT` use `%#I` / `%#d` so the clock reads `3:25`, not
+`03:25`. The `%-I` / `%-d` form found in many Python examples is not supported
+on Windows and raises `ValueError: Invalid format string`.
+
+---
+
+## Things that are safe to change
+
+- Font, font sizes, text positions, margins
+- Which GIF is played, its FPS, JPEG quality
+- Clock and date formats (`TIME_FMT`, `DATE_FMT` in `clock_win.py`)
+- Which stats are shown (`--slots`) and how often they refresh
+- Width, **downwards only** — 320 is the maximum for the rooftop GIF, even
+  though `MAX_PIXELS` currently lets 324–329 through (see constraint 2)
+
+---
+
+## Why a COM port is all it takes
+
+**The vendor's Windows software drives the panel through a COM port, not
+through libusb.** So this project needs no libusb, no Zadig, no driver
+replacement and no administrator rights.
+
+The evidence:
+
+| Check | Result |
+|---|---|
+| `libusb0.sys` on the system | **absent** — no driver file, no service, no filter |
+| Device enumeration | plain CDC-ACM composite; interfaces 0+1 owned by Microsoft's `usbser.sys` |
+| Children of the composite device | exactly one, `USB Serial Device (COM5)` |
+| Opening COM5 while LCD Control.exe runs | `Access to the port 'COM5' is denied` |
+
+That last line is the proof: the vendor app holds the COM port exclusively. It
+ships a `libusb` folder in its install directory, but never installs or uses
+that driver for this panel.
+
+The device is a standard CDC-ACM composite:
+
+- **interface 0** — CDC control
+- **interface 1** — CDC data, bulk OUT endpoint `0x02`
+
+Endpoint `0x02` on interface 1 is where the frame data goes. `usbser.sys` owns
+that endpoint and exposes it as a COM port, so writing bytes to the port puts
+them straight on the endpoint. Windows COM ports pass binary data through
+untouched, as long as flow control is off (constraint 5).
+
+---
+
+## What the vendor app revealed
+
+Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
+
+- **Its code cannot be read.** An obfuscator encrypts every method body and
+  every text string; only class and method names survive. So the exact bytes it
+  sends beyond the frame format above are unknown, and this project was written
+  from scratch instead.
+- **The class that drives this panel is small.** `DLSDevice` can open the port,
+  send frames, read the panel's serial number and reconnect. It has no command
+  for a boot image, brightness or sleep timeout — which is why the Welcome
+  screen and the timeout look fixed in the firmware.
+- **The panel answers a serial-number request.** The app's log says
+  "waiting 1 s to receive the SN" after opening the port. The serial is a
+  string beginning with `VMAX`; the app uses it to keep per-panel settings.
+- **It bundles an old LibreHardwareMonitor** (0.9.3) for its own sensor
+  readouts. That version predates the switch to the PawnIO driver and uses
+  WinRing0 instead (see [Temperatures](#temperatures-planned)).
+- **Its settings** live in
+  `%APPDATA%\Hailian Zhixin (Shenzhen) Technology Co., Ltd\LCD Control\Config.json`,
+  including whether it starts with Windows (`AutoStar`).
+
+---
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `README.md` | Setup and everyday use, for people who just want it running |
+| `LICENSE` | GNU GPL v3.0, the project's license (see the README's License section) |
+| `docs/HOW-IT-WORKS.md` | This file |
+| `AGENTS.md`, `CLAUDE.md` | Rules for AI coding assistants working on the repo |
+| `requirements.txt` | The exact library versions the project is tested with |
+| `setup.cmd` | One-time setup: creates `venv-win` and installs `requirements.txt` into it |
+| `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, which `clock_win.py` imports. **The core driver — treat with care.** |
+| `clock_win.py` | Overlay player: GIF + clock + date + configurable stats |
+| `run-clock.cmd` | Runs `clock_win.py` with the known-good settings |
+| `run-gif.cmd` | Runs `lcd_win.py` — plain GIF, no overlay. **Known-good fallback.** |
+| `retro_pixel_guy_smoking_on_rooftop.gif` | The wallpaper GIF |
+| `venv-win/` | Python environment created by `setup.cmd`. Not in git. |
+
+If you break `clock_win.py`, `run-gif.cmd` still works and proves the hardware,
+the port and the frame format are all fine.
+
+---
+
+## Command-line options
+
+Extra arguments to `run-clock.cmd` pass straight through to `clock_win.py`:
+
+```cmd
+run-clock.cmd --fps 15
+run-clock.cmd --font segoeuib.ttf
+run-clock.cmd --text-fill 0.9
+run-clock.cmd --no-stats
+run-clock.cmd --slots cpu,gpu,ram%,vram
+```
+
+For the full list:
+
+```cmd
+venv-win\Scripts\python.exe clock_win.py --help
+```
+
+Inside a `.cmd` file a `%` must be written twice, so `ram%` becomes `ram%%`
+(see the comment at the top of `run-clock.cmd`). On the command line a single
+`%` is fine.
+
+### Clock and date sizing
+
+Both lines are **centred** and sized automatically: they grow until they span
+`--text-fill` of the available width, so the clock and the date always come out
+the same width as each other and scale together.
+
+| `--text-fill` | clock | date |
+|---|---|---|
+| `1.0` | 59px | 28px |
+| `0.92` | 53px | 26px |
+| `0.88` | 51px | 24px |
+| **`0.82`** | **48px** | **22px** — the default |
+| `0.75` | 44px | 20px |
+
+They are sized against the widest string each can ever produce — `12:00 PM`
+beats `1:05 AM`, and a two-digit day beats the one-digit day `%#d` can produce —
+so neither can outgrow the frosted panel at runtime.
+
+`--time-size` and `--date-size` still cap either line individually if you want
+them sized independently rather than matched.
+
+### Tuning the layout without stopping the panel
+
+`--preview` renders one frame to a PNG and exits **without opening the port**,
+so the panel keeps running while you iterate:
+
+```cmd
+venv-win\Scripts\python.exe clock_win.py retro_pixel_guy_smoking_on_rooftop.gif --preview test.png --stats-y 1150
+```
+
+### A different GIF
+
+```cmd
+run-clock.cmd --width 280
+```
+
+To play another GIF, change the file name in `run-clock.cmd`. A GIF with a
+different shape has a different maximum width. Pick a width where the startup
+line reports **472,320 px or fewer**. Don't rely on the "over the pixel limit"
+refusal: it only triggers above 500,000 px, and frames between ~480,000 and
+500,000 px pass it and still come out scrambled (constraint 2).
+
+Images and GIFs only. Video would need ffmpeg.
+
+---
+
+## Stats slots
+
+`--slots` takes a comma-separated list, filling the grid **two per row**. An odd
+one at the end is **centred across the full width**.
+
+Default: `cpu,gpu,ram%,disk%,net`
+
+```
+CPU Usage      GPU Usage
+     6%             1%
+
+RAM Usage    Drive Usage
+    49%            29%
+
+      Net D/U MB/s
+        0.0/0.1
+```
+
+| Slot | Label | Example | Notes |
+|---|---|---|---|
+| `cpu` | CPU Usage | `6%` | |
+| `gpu` | GPU Usage | `1%` | busiest GPU engine type, as Task Manager reports it |
+| `ram` | RAM | `7.5G` | |
+| `ram%` | RAM Usage | `49%` | |
+| `vram` | GPU VRAM | `0.9G` | dedicated video memory in use |
+| `clock` | CPU Clock | `4.02G` | **live**, including boost |
+| `net` | Net D/U MB/s | `12/1.4` | down and up together |
+| `netdown` | Net Down | `12.4M/s` | |
+| `netup` | Net Up | `1.4M/s` | |
+| `diskio` | Disk I/O | `1.1M/s` | read + write throughput |
+| `disk%` | Drive Usage | `29%` | how hard the drives are working — see below |
+| `storage` | Storage Used | `66%` | space consumed, every fixed drive pooled |
+| `disk` | Disk Free | `64G` | system drive only |
+| `procs` | Processes | `229` | |
+| `uptime` | Uptime | `1h 41m` | |
+
+Both fonts are sized against the **widest plausible value** of every chosen
+slot, so a reading can never outgrow its column once running.
+
+### How often readings update
+
+| What | How often | Where it's set |
+|---|---|---|
+| Frames sent to the panel | 10 per second | `--fps` |
+| Every slot except the two below | every 2 seconds | `interval=2.0` in `Metrics.__init__` |
+| `storage`, `disk` | every 30 seconds | `_cached(...)` calls in `Metrics` |
+| Clock and date | checked on every frame | — |
+
+CPU load and the throughput slots are averages over the 2-second window. A
+shorter window reads as noise, and every changed value forces the affected
+frames to be re-encoded.
+
+### `disk%` is activity, `storage` is space
+
+These are easy to confuse and they measure completely different things.
+
+**`disk%` — Drive Usage.** How hard the drives are working right now. Idles at
+0–2% and spikes when they are actually being read or written. Averaged across
+the physical disks so all of them together make 100%, meaning one disk pinned
+out of three reads about 33%:
+
+```
+idle                    0%
+320MB write to C:      29%   (C: 87%, E: 0%, F: 0%)
+back to idle            0%
+```
+
+It inverts `\PhysicalDisk(*)\% Idle Time`, which is how Task Manager derives
+its "Active time" column. **The obvious-looking `% Disk Time` counter does not
+work** — it is queue-length based, reads a flat `0.0` on these drives and can
+exceed 100% on others.
+
+**`storage` — Storage Used.** Space consumed: total used over total capacity
+across every fixed drive, as though they were one pool. Drives weigh by size,
+not one share each. This number barely moves from day to day. Cached for 30
+seconds rather than 2, so a spinning disk is not woken every other second.
+
+### `net` follows the active adapter by itself
+
+It reports the **busiest single physical adapter**, re-evaluated every tick.
+
+Summing all interfaces would count VPN traffic twice, once on the tunnel and
+again on the physical NIC beneath it. Taking the busiest avoids that, and
+`VIRTUAL_NICS` filters out loopback, Hyper-V, VMware, Tailscale, WireGuard and
+similar.
+
+The choice is **sticky while idle**, so the reading does not flicker between
+adapters at rest. Unplug the ethernet and wifi starts winning on traffic, so
+the display follows it with no configuration.
+
+### `clock` is the only live CPU frequency available
+
+`psutil.cpu_freq()` is useless on Windows: it returns the **base** clock
+(3501 MHz on a Ryzen 5 5600) no matter what the CPU is doing. The live figure
+comes from the `\Processor Information(_Total)\% Processor Performance`
+counter, scaled against the base clock — that one tracks boost, reading
+~4.0 GHz at idle and higher under load.
+
+---
+
+## Temperatures (planned)
+
+Not shown yet. Windows gives CPU and GPU temperatures **only to kernel-mode
+code** — there is no normal API a program can call, which is why every
+temperature tool installs a driver.
+
+The plan:
+
+- **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)**
+  (MPL-2.0), loaded as a library from Python, reads the sensors.
+- It reaches the hardware through the **[PawnIO](https://pawnio.eu/)** driver
+  (2.2.0, signed by Microsoft). PawnIO replaced the old WinRing0 driver in
+  LibreHardwareMonitor 0.9.5 because WinRing0 has a known vulnerability,
+  [CVE-2020-14979](https://nvd.nist.gov/vuln/detail/CVE-2020-14979), and
+  antivirus software flags it. Without PawnIO, LibreHardwareMonitor cannot read
+  any CPU values.
+- PawnIO is a kernel driver, so it has to be installed into Windows once, with
+  administrator rights. It is **not** bundled in this repo; the README links to
+  it. Reading temperatures will also need the script to run as administrator.
+
+Adding it is a new method in `Metrics` and new entries in `SLOTS`. Nothing else
+changes.
+
+---
+
+## Performance
+
+Measured on a Ryzen 5 5600, at 10 FPS, 320 × 1476, with stats:
+
+**7.6% of one core, 142 MB RAM.**
+
+Per-frame cost:
+
+| Stage | Time |
+|---|---|
+| copy + frost (2 panels, blur 9) | 4.64 ms |
+| draw text | 1.52 ms |
+| rotate 180° | 0.74 ms |
+| JPEG encode (q88, no subsampling) | 1.58 ms |
+| USB write (≈107 KB) | 6.7 ms |
+
+The port sustains **15.5 MB/s**. At 10 FPS the GIF needs 0.67 MB/s, so there is
+an enormous margin — frame rate is not a constraint on this transport.
+
+Frames are cached and re-encoded only when the displayed text changes. To reduce
+the cost: raise the stats interval, lower `--fps`, or use `--no-stats`.
+
+---
+
+## Approaches that did not work
+
+Recorded so they are not attempted again.
+
+**Zadig / replacing the driver with WinUSB or libusb-win32.** Unnecessary, and
+it would *break* things — it unbinds `usbser.sys`, destroying the COM port that
+both this and the vendor software depend on. There is no reason to touch the
+driver on Windows.
+
+**Blaming frame rate, JPEG size in bytes, chroma subsampling, or the header's
+`flag` field.** All were tested on this panel and ruled out. Frame rate from
+0.33 to 120 FPS behaves identically. The real variable is always **pixel count**.
+
+**Chasing frame pacing, chunked writes or DTR handling when the panel was
+blank.** All were suspected; none was the cause. The transport worked on the
+very first attempt — the frame simply needed to keep being sent. Measure before
+changing anything: if `write()` returns at ~15 MB/s with `out_waiting == 0`,
+the bytes reached the device and the fault is elsewhere.
+
+**Raising the width past 320 because `MAX_PIXELS` seemed to leave room.** The
+500k figure was a rounded guess; the panel already corrupts at 324 × 1494
+(484,056 px). Tested on the hardware on 2026-09-29 — see constraint 2.
+
+**Reading the vendor app's code to learn its commands.** It is obfuscated; see
+[What the vendor app revealed](#what-the-vendor-app-revealed).
+
+**Using `psutil.cpu_freq()` for a live clock, or `% Disk Time` for drive
+activity.** Both look right and both are wrong on Windows. See
+[Stats slots](#stats-slots).

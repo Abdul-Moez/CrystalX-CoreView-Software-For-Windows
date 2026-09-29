@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CrystalX CoreView LCD for Windows
+# Copyright (C) 2026 Abdul Moez (https://github.com/Abdul-Moez)
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program (the LICENSE file). If not, see
+# <https://www.gnu.org/licenses/>.
+#
+# Additional term under section 7(b) of the GNU GPL version 3: the author
+# attribution "Abdul Moez (https://github.com/Abdul-Moez)" must be preserved
+# in this file and in all copies and modified versions of it.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Play images or GIFs on the CrystalX CoreView case LCD, from Windows.
 
 The panel is a plain CDC-ACM composite device, so Windows' in-box usbser.sys
@@ -11,8 +33,9 @@ That means no libusb, no Zadig, no driver replacement and no admin rights.
 The only rule is that nothing else may hold the port, so close LCD Control.exe
 before running this.
 
-Every hardware quirk in README.md applies -- the 180 degree rotation, the
-~472k pixel ceiling, and the fact that the panel never scales an image up.
+Every hardware quirk in docs/HOW-IT-WORKS.md applies -- the 180 degree
+rotation, the ~472k pixel ceiling, and the fact that the panel never scales
+an image up.
 
 Usage:
     lcd_win.py <source> [--width 320] [--fps 10] [--quality 88]
@@ -35,7 +58,8 @@ VID, PID = 0x33C3, 0xF101
 MAGIC = 0x0008100A
 
 # Empirically determined on a CoreView V-950: 320x1476 (472k px) is stable,
-# 334x1540 (514k px) tears. Stay well under the ceiling. See README.md.
+# 324x1494 (484k px) already tears, so this check is looser than the real
+# ceiling. See docs/HOW-IT-WORKS.md, constraint 2.
 MAX_PIXELS = 500_000
 
 # CDC ACM ignores the line rate -- there is no real UART behind it -- but

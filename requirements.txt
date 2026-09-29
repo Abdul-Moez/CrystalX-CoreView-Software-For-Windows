@@ -1,0 +1,5 @@
+# Exact versions this project is tested with. setup.cmd installs these.
+pillow==12.3.0
+pyserial==3.5
+psutil==7.2.2
+pywin32==312

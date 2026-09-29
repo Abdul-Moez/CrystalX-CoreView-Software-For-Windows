@@ -1,4 +1,26 @@
 #!/usr/bin/env python3
+# CrystalX CoreView LCD for Windows
+# Copyright (C) 2026 Abdul Moez (https://github.com/Abdul-Moez)
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program (the LICENSE file). If not, see
+# <https://www.gnu.org/licenses/>.
+#
+# Additional term under section 7(b) of the GNU GPL version 3: the author
+# attribution "Abdul Moez (https://github.com/Abdul-Moez)" must be preserved
+# in this file and in all copies and modified versions of it.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Play a GIF on the CrystalX CoreView panel with a clock and system stats.
 
 Text is drawn over each frame, outlined and sitting on a frosted panel, so
