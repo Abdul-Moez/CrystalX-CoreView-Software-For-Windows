@@ -2,3 +2,10 @@ __pycache__/
 venv/
 venv-win/
 venv-win.old
+
+# Build output (PyInstaller, the installer, downloaded build tools)
+build/
+dist/
+downloads/
+inno/
+release-notes.md

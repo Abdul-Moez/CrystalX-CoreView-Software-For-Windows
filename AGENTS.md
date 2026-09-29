@@ -34,6 +34,30 @@ too.
   upgrading them, update the versions and SHA-256 list in its
   `THIRD-PARTY-NOTICES.md`, and keep each component's license file.
 
+## The app (service + window + installer)
+
+See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
+
+- **Keep the security rules** listed there. In particular: the service runs as
+  SYSTEM, so never let the window pass it a file path (send bytes), never grant
+  users more than start/stop on the service (`SERVICE_SDDL`; never
+  `SERVICE_CHANGE_CONFIG`), keep `C:\ProgramData\CrystalX LCD` locked to
+  SYSTEM/administrators, and keep the app in Program Files (the installer has
+  no folder choice on purpose).
+- **Service control from the window must ask for minimal rights** — use
+  `tray_win._with_service`. pywin32's `win32serviceutil.StartService` /
+  `StopService` open the service manager with full access and fail for normal
+  users.
+- The engine is shared: the service runs `clock_win.main(argv, stop, log)`.
+  Keep the command-line behaviour of the scripts unchanged when editing it.
+- The window: everything lives in one window; the tray menu has only **Show**
+  and **Quit**. Closing the window hides it; Quit stops the service and exits.
+- **Releases:** the version lives only in `VERSION` in `ipc_win.py`. Bump it,
+  commit, then the user tags `vX.Y.Z` and pushes the tag; the workflow checks
+  they match. Never change the installer's `AppId`. When updating PawnIO or
+  Inno Setup, update the URL **and** SHA-256 in `release.yml` together.
+- **The user commits and pushes; don't.** Hand over a commit message instead.
+
 ## Testing
 
 - **You cannot see the panel.** Only the user can confirm that output looks
@@ -56,6 +80,12 @@ too.
 - `run-gif.cmd` is the known-good baseline. If something breaks, go back to it
   to establish whether the problem is the hardware or the change.
 - Put experiments and throwaway scripts outside the repo.
+- **In-process tests of the service must use their own pipe name and data
+  folder** (patch `PIPE_NAME`, `DATA_DIR`, `CONFIG_FILE`, `LOG_FILE` in both
+  `ipc_win` and `service_win`). When the app is installed, the real service
+  owns `\\.\pipe\CrystalXLCD`; a test copy cannot create it, so the test's
+  requests silently reach the real service and change the user's settings.
+  This happened once.
 - Windows reads a `.cmd` file line by line while it runs. Don't edit
   `run-clock.cmd` or `run-gif.cmd` while a copy of it is running.
 - Measure before optimising, and check what a measurement actually means —
@@ -82,11 +112,14 @@ too.
 - **Never use Python 3.13.0.** Its venv `pythonw.exe` opens a console window
   (CPython #126084), which breaks the hidden autostart. `setup.cmd` refuses it;
   keep that check. The maintainer's `venv-win` uses Python 3.13.5.
-- **PawnIO** (needed for the CPU temperature) is a kernel driver. It is **not**
-  bundled in the repo; the README names the version and links to
-  https://pawnio.eu/. Keep it that way.
+- **PawnIO** (needed for the CPU temperature) is a kernel driver. It is **never
+  stored in the repo**: the release workflow downloads the official installer
+  (checked by SHA-256 and signature) and the app's installer runs it with
+  `-install -silent` only if PawnIO is missing. Script users install it from
+  https://pawnio.eu/. Keep it that way, and never uninstall PawnIO with the app.
 - `setup.cmd` must keep unblocking `lib\` (`Unblock-File`): .NET refuses DLLs
   that carry the "downloaded from the internet" mark.
 - `README.md` is for people who just want the screen running and may not know
-  GitHub. Keep it step by step and free of internals. Technical detail goes in
-  `docs/HOW-IT-WORKS.md`; rules for agents go here.
+  GitHub: install the app, use it, uninstall it. Keep it step by step and free
+  of internals. The script route lives in `docs/SCRIPTS.md`, technical detail
+  in `docs/HOW-IT-WORKS.md`, rules for agents here.

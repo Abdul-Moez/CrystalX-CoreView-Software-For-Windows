@@ -177,7 +177,7 @@ class Temperatures:
             if not self.admin:
                 return "needs administrator rights"
             if self.pawnio == "missing":
-                return "needs the PawnIO driver, see README"
+                return "needs the PawnIO driver from pawnio.eu"
             if self.pawnio == "stopped":
                 return "the PawnIO driver would not start"
         return "the sensor reads nothing"

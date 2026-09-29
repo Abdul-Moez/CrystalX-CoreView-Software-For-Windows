@@ -52,7 +52,7 @@ from io import BytesIO
 
 import serial
 import serial.tools.list_ports
-from PIL import Image, ImageSequence
+from PIL import Image, ImageFilter, ImageSequence
 
 VID, PID = 0x33C3, 0xF101
 MAGIC = 0x0008100A
@@ -61,6 +61,11 @@ MAGIC = 0x0008100A
 # 324x1494 (484k px) already tears, so this check is looser than the real
 # ceiling. See docs/HOW-IT-WORKS.md, constraint 2.
 MAX_PIXELS = 500_000
+
+# The largest frame measured clean on the panel. Pictures placed with a fit
+# mode go on a canvas of this shape, so any picture ends up within the limit.
+FIT_SIZE = (320, 1476)
+FIT_MODES = ("fill", "blur", "color")
 
 # CDC ACM ignores the line rate -- there is no real UART behind it -- but
 # Windows still wants a valid value.
@@ -117,25 +122,60 @@ class Panel:
             pass
 
 
-def load_frames(source, width):
+def fit_frame(frame, size, mode, color=(0, 0, 0)):
+    """Place one RGB frame on a canvas of `size`.
+
+    fill  -- scale to cover the whole canvas, cropping what overflows
+    blur  -- the whole picture visible, gaps filled with a blurred copy of it
+    color -- the whole picture visible, gaps filled with `color`
+    """
+    w, h = size
+    if mode == "fill":
+        scale = max(w / frame.width, h / frame.height)
+        big = frame.resize((max(w, round(frame.width * scale)),
+                            max(h, round(frame.height * scale))), Image.LANCZOS)
+        x, y = (big.width - w) // 2, (big.height - h) // 2
+        return big.crop((x, y, x + w, y + h))
+    if mode == "blur":
+        # Blurring a small copy and scaling it back up is far cheaper than a
+        # large-radius blur at full size, and looks the same.
+        back = fit_frame(frame, (max(1, w // 8), max(1, h // 8)), "fill")
+        back = back.filter(ImageFilter.GaussianBlur(3)).resize(size, Image.BILINEAR)
+        back = Image.blend(back, Image.new("RGB", size, (0, 0, 0)), 0.35)
+    else:
+        back = Image.new("RGB", size, color)
+    scale = min(w / frame.width, h / frame.height)
+    small = frame.resize((max(1, round(frame.width * scale)),
+                          max(1, round(frame.height * scale))), Image.LANCZOS)
+    back.paste(small, ((w - small.width) // 2, (h - small.height) // 2))
+    return back
+
+
+def load_frames(source, width, fit=None, color=(0, 0, 0)):
     """Composite every frame of the source and scale it to `width`.
 
     Seeking a GIF frame and converting it composites that frame over the ones
     before it, so every frame comes out complete even when the GIF only stores
     the pixels that changed.
 
-    Height follows the source aspect ratio.
+    Without `fit`, height follows the source aspect ratio. With a fit mode
+    (see fit_frame), every frame goes on a canvas of FIT_SIZE's shape instead,
+    so any picture -- wide, square or tall -- fills the frame the same way.
     """
     try:
         img = Image.open(source)
     except OSError as e:
         sys.exit(f"cannot read {source}: {e}\n"
                  "(images and GIFs only -- video would need ffmpeg)")
+    size = (width, round(width * FIT_SIZE[1] / FIT_SIZE[0])) if fit else None
     frames = []
     for frame in ImageSequence.Iterator(img):
         rgb = frame.convert("RGB")
-        height = round(rgb.height * width / rgb.width)
-        frames.append(rgb.resize((width, height), Image.LANCZOS))
+        if size:
+            frames.append(fit_frame(rgb, size, fit, color))
+        else:
+            height = round(rgb.height * width / rgb.width)
+            frames.append(rgb.resize((width, height), Image.LANCZOS))
     if not frames:
         sys.exit(f"nothing rendered from {source}")
     return frames

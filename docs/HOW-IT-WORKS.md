@@ -19,7 +19,9 @@ quirks. They are written down so nobody has to rediscover them.
 - [Command-line options](#command-line-options)
 - [Stats slots](#stats-slots)
 - [Temperatures](#temperatures)
-- [Admin rights and autostart](#admin-rights-and-autostart)
+- [The app: service, window and installer](#the-app-service-window-and-installer)
+- [Making a release](#making-a-release)
+- [Admin rights and autostart (scripts)](#admin-rights-and-autostart-scripts)
 - [Performance](#performance)
 - [Approaches that did not work](#approaches-that-did-not-work)
 
@@ -85,7 +87,8 @@ frames stop (see constraint 4).
 **The Welcome image and the timeout cannot be changed from software**, as far
 as anyone has found. The vendor app has no command for either (see below), so
 they are fixed in the firmware. The only thing you can do is start streaming
-earlier — the README's autostart section makes the clock take over at login.
+earlier — the app's service takes over as soon as Windows starts, before
+anyone logs in.
 Nothing can run before Windows starts, so Welcome always shows briefly.
 
 ---
@@ -270,20 +273,33 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 
 | File | Purpose |
 |---|---|
-| `README.md` | Setup and everyday use, for people who just want it running |
+| `README.md` | Installing and using the app, for people who just want it running |
 | `LICENSE` | GNU GPL v3.0, the project's license (see the README's License section) |
 | `docs/HOW-IT-WORKS.md` | This file |
+| `docs/SCRIPTS.md` | Running from source with the `.cmd` scripts instead of the app |
 | `AGENTS.md`, `CLAUDE.md` | Rules for AI coding assistants working on the repo |
-| `requirements.txt` | The exact library versions the project is tested with |
-| `setup.cmd` | One-time setup: creates `venv-win` and installs `requirements.txt` into it |
-| `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, which `clock_win.py` imports. **The core driver — treat with care.** |
-| `clock_win.py` | Overlay player: GIF + clock + date + configurable stats |
+| **The engine** | |
+| `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, `fit_frame`, which `clock_win.py` imports. **The core driver — treat with care.** |
+| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. Its `main()` is also what the service runs. |
 | `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
 | `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
+| `retro_pixel_guy_smoking_on_rooftop.gif` | The default picture |
+| **The app** | |
+| `service_win.py` | The Windows service: runs the engine from boot, answers the window over a pipe |
+| `tray_win.py` | The window and the notification-area icon |
+| `ipc_win.py` | Shared by both: the version, names, paths, settings file and pipe protocol |
+| `assets/` | The app icon and the script that draws it |
+| `packaging/crystalx-lcd.spec` | PyInstaller recipe: both programs, one folder, one bundled Python |
+| `packaging/installer.iss` | Inno Setup script for `CrystalX-LCD-Setup-<version>.exe` |
+| `packaging/collect_licenses.py`, `packaging/licenses/` | Gathers the licence of everything bundled into the app's `licenses` folder |
+| `packaging/requirements-build.txt` | Exact versions of the build-only tools |
+| `.github/workflows/release.yml` | Builds the installer and publishes the GitHub release when a version tag is pushed |
+| **The scripts** | |
+| `requirements.txt` | The exact library versions the project is tested with |
+| `setup.cmd` | One-time setup: creates `venv-win` and installs `requirements.txt` into it |
 | `run-clock.cmd` | Runs `clock_win.py` with the known-good settings, asking for admin rights first |
 | `run-gif.cmd` | Runs `lcd_win.py` — plain GIF, no overlay, no admin. **Known-good fallback.** |
 | `autostart-on.cmd`, `autostart-off.cmd` | Create or remove the login task that runs the clock hidden, as admin, without a prompt |
-| `retro_pixel_guy_smoking_on_rooftop.gif` | The wallpaper GIF |
 | `venv-win/` | Python environment created by `setup.cmd`. Not in git. |
 
 If you break `clock_win.py`, `run-gif.cmd` still works and proves the hardware,
@@ -495,7 +511,10 @@ PawnIO replaced the old WinRing0 driver in LibreHardwareMonitor 0.9.5.
 WinRing0 has a known vulnerability,
 [CVE-2020-14979](https://nvd.nist.gov/vuln/detail/CVE-2020-14979), and
 antivirus software flags it. Without PawnIO, LibreHardwareMonitor cannot read
-any CPU values. PawnIO is **not** bundled in this repo; the README links to it.
+any CPU values. PawnIO is **never stored in this repo**: the release build
+downloads the official, signed installer and checks its fingerprint, and the
+app's installer runs it only if PawnIO is missing. Script users install it
+themselves ([SCRIPTS.md](SCRIPTS.md), step 4).
 
 Two things were found on the test machine:
 
@@ -515,13 +534,132 @@ Windows marks every file extracted from a downloaded ZIP as "from the
 internet", and the .NET Framework refuses to load DLLs carrying that mark
 (`An attempt was made to load an assembly from a network location…`).
 `setup.cmd` clears the mark on `lib\` with `Unblock-File`. If temperatures say
-"Windows is blocking the DLLs", run `setup.cmd` again.
+"Windows is blocking the DLLs", run `setup.cmd` again. (The installed app is not
+affected: files an installer writes carry no such mark.)
 
 ---
 
-## Admin rights and autostart
+## The app: service, window and installer
 
-Reading the CPU temperature needs administrator rights. The project handles
+The installed app is the same engine (`clock_win.py`, `lcd_win.py`,
+`temps_win.py`) wrapped in two programs:
+
+```
+   CrystalXLCD.exe (tray_win.py)                CrystalXLCD-Service.exe (service_win.py)
+   the signed-in user, no admin                 SYSTEM, from boot
+  +---------------------------+   named pipe   +------------------------------+
+  | window + tray icon        | -------------> | pipe server                  |
+  | status, start/stop,       |  JSON, local   | Display thread:              |
+  | picture, options          |  users only    |   clock_win.main(stop=...)   |
+  +-------------+-------------+                |   retries when the panel is  |
+                | start / stop                 |   busy or missing            |
+                v                              +--------------+---------------+
+      Windows service manager  ------------------------------>|
+                                                              v
+                                              COM port -> panel,  LibreHardwareMonitor
+                                              C:\ProgramData\CrystalX LCD\ (settings, picture, log)
+```
+
+**Why a service.** It starts at boot, so the clock is up on the login screen,
+and it runs as SYSTEM, so the CPU temperature (admin only) always works and
+there is never an admin prompt.
+
+**Start / Stop / Quit** start and stop the service itself. Stopped, it holds
+nothing — the COM port, LibreHardwareMonitor and PawnIO are all free for other
+programs, which is the point of Stop. **Start display with Windows** switches
+the service between automatic and manual start.
+
+**Settings** travel over the pipe `\\.\pipe\CrystalXLCD` as one JSON message
+each way (`ipc_win.request`). If the display is off, the window starts the
+service with the argument `--idle`: it then only applies settings, touches no
+hardware, and stops itself 20 seconds after the last request.
+
+**Security.** The service runs as SYSTEM, so everything a normal user can reach
+is kept narrow:
+
+| Rule | Why |
+|---|---|
+| The app lives in Program Files; the installer offers no folder choice | A SYSTEM service's files must not be writable by normal users, or anyone could swap the program |
+| Users may **start and stop** the service, nothing more (`SERVICE_SDDL`) | Changing its configuration would let a user point a SYSTEM service at their own program |
+| The pipe accepts local clients only: SYSTEM, administrators and the signed-in user | No remote access |
+| The first pipe instance claims the name (`FILE_FLAG_FIRST_PIPE_INSTANCE`) | Nothing else can create the pipe first and pose as the service |
+| The window never sends a file path — it reads the picture and sends the bytes | Otherwise any program could get SYSTEM to open files on its behalf |
+| The service checks every picture (format, size ≤ 50 MB, ≤ 300 frames) and keeps its own copy | A long GIF held in memory at panel size could otherwise eat gigabytes |
+| `C:\ProgramData\CrystalX LCD` is writable only by SYSTEM and administrators | A user can't plant a picture or settings file for the service to read |
+
+**Fitting any picture.** Pictures chosen in the app are placed on a canvas of
+the tested 320 × 1476 frame (`fit_frame`): *fill* crops to cover it, *blur* and
+*color* show the whole picture with blurred or solid edges. So every picture,
+whatever its shape, stays inside the pixel ceiling (constraint 2).
+
+**The window** is tkinter. Its preview runs `clock_win.main(..., "--preview",
+"--sample-stats")` in the background, so it shows exactly what the panel will
+show, with example readings instead of loading the sensors. It starts hidden
+with `--hidden` (at login); starting it again (Start menu) tells the running
+copy to show its window.
+
+**The installer** (`packaging/installer.iss`, Inno Setup):
+
+- stops the app and service, and removes the script version's
+  `CrystalX LCD` login task if present, so an upgrade can replace every file;
+- copies the PyInstaller folder to `C:\Program Files\CrystalX LCD`;
+- runs `PawnIO_setup.exe -install -silent` only when PawnIO is missing or
+  older than 2.0, before the service first starts;
+- installs the service (`CrystalXLCD-Service.exe --startup auto install`, which
+  also applies `SERVICE_SDDL`) on a fresh install, then starts it;
+- adds the Start menu entry and `CrystalXLCD.exe --hidden` under `HKLM\...\Run`;
+- offers to disable LCD Control's `LCD ControlPowerBoot` task;
+- on uninstall, stops everything, deletes the service and
+  `C:\ProgramData\CrystalX LCD`. PawnIO is left in place: it is a shared
+  driver with its own uninstaller.
+
+Its `AppId` must never change — Windows uses it to recognise upgrades.
+
+**File properties.** Both programs carry a version resource (company, product,
+version), so Task Manager lists them as *CrystalX LCD* and *CrystalX LCD
+service* rather than as nameless Python processes.
+
+---
+
+## Making a release
+
+1. Change `VERSION` in `ipc_win.py` (the only place the version lives) and
+   commit.
+2. Tag the commit with the same version and push the tag:
+
+   ```cmd
+   git tag v1.0.1
+   git push origin v1.0.1
+   ```
+
+3. `.github/workflows/release.yml` then, on a fresh Windows machine:
+   - checks the tag matches `VERSION`, and that Python is not 3.13.0;
+   - installs the exact build tools from `packaging/requirements-build.txt`;
+   - builds the two programs with PyInstaller and collects the licences;
+   - downloads PawnIO 2.2.0 and Inno Setup 7.1.0, and refuses to continue
+     unless both match their SHA-256 fingerprints and carry valid signatures;
+   - builds `CrystalX-LCD-Setup-<version>.exe` and its `.sha256` file, and
+     publishes both as a GitHub release.
+
+Running the workflow by hand (Actions tab → Release → Run workflow) builds the
+installer as a downloadable artifact without publishing anything — a safe way
+to test a change to the build.
+
+**The build toolchain has no EULA.** Inno Setup is open source under a
+permissive licence. WiX 7 was considered for a `.msi`, but its prebuilt tools
+require accepting an Open Source Maintenance Fee EULA; Inno Setup was chosen to
+avoid that, and because running PawnIO's own installer is a normal step for it.
+
+To build the installer locally, see the header of `packaging/installer.iss`.
+
+---
+
+## Admin rights and autostart (scripts)
+
+This section is about the `.cmd` scripts (see [SCRIPTS.md](SCRIPTS.md)); the
+app handles admin rights with its service instead.
+
+Reading the CPU temperature needs administrator rights. The scripts handle
 this the same way LCD Control does:
 
 | Started… | How | Prompt? |
@@ -613,7 +751,23 @@ must also be running and registered the official way; see
 
 **`schtasks /create` for autostart.** Its default 3-day time limit stops the
 clock on a PC left running, and its 261-character command limit breaks long
-folder paths. See [Admin rights and autostart](#admin-rights-and-autostart).
+folder paths. See [Admin rights and autostart](#admin-rights-and-autostart-scripts).
+
+**pywin32's `win32serviceutil.StartService` / `StopService` from the window.**
+They open the service manager with full access, which only administrators
+have, so a normal user got "Access is denied" even though the service allows
+them to start and stop it. `tray_win._with_service` asks for only the rights
+each action needs.
+
+**Testing the service in-process while the app is installed.** The installed
+service owns `\\.\pipe\CrystalXLCD`, so a test copy could not create it — and
+its requests silently reached the real service and changed its settings. Tests
+must use their own pipe name and data folder.
+
+**Sizing an empty tkinter `Label` in pixels.** With no image yet, `width` and
+`height` count text characters and lines, so the preview first opened huge,
+then shrank when the picture arrived. The preview is a `Canvas`, which is
+always sized in pixels.
 
 **Using `psutil.cpu_freq()` for a live clock, or `% Disk Time` for drive
 activity.** Both look right and both are wrong on Windows. See

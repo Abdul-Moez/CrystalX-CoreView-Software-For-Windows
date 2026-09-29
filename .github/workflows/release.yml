@@ -1,0 +1,134 @@
+# CrystalX CoreView LCD for Windows
+# Copyright (C) 2026 Abdul Moez (https://github.com/Abdul-Moez)
+# SPDX-License-Identifier: GPL-3.0-or-later -- see the LICENSE file.
+#
+# Builds CrystalX-LCD-Setup-<version>.exe and publishes it as a GitHub release.
+#
+#   Release:     push a version tag that matches VERSION in ipc_win.py
+#                  git tag v1.0.0
+#                  git push origin v1.0.0
+#   Test build:  Actions tab -> Release -> Run workflow. Builds the installer
+#                as a downloadable artifact; publishes nothing.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write     # to create the release
+
+env:
+  # Downloaded at build time, never stored in the repo, and checked against
+  # these fingerprints and their digital signatures before use.
+  PAWNIO_URL: https://github.com/namazso/PawnIO.Setup/releases/download/2.2.0/PawnIO_setup.exe
+  PAWNIO_SHA256: 1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe
+  INNO_SHA256: 0362A383ED217D4C4239B5933866DD96D3EB2102737DA92F80F6057A4B40DF2F
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Check the Python and the version
+        id: version
+        shell: pwsh
+        run: |
+          # 3.13.0 breaks the hidden start of the tray app (see AGENTS.md).
+          python -c "import sys; assert sys.version_info[:3] != (3, 13, 0), 'Python 3.13.0 is not allowed'"
+          if ($LASTEXITCODE) { exit 1 }
+          $version = (Select-String -Path ipc_win.py -Pattern '^VERSION = "([\d.]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The tag $env:GITHUB_REF_NAME does not match VERSION = `"$version`" in ipc_win.py"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "Building version $version with $(python --version)"
+
+      - name: Install the build tools
+        run: python -m pip install --disable-pip-version-check -r packaging/requirements-build.txt
+
+      - name: Build the app
+        run: pyinstaller packaging/crystalx-lcd.spec --noconfirm
+
+      - name: Collect the third-party licences
+        run: python packaging/collect_licenses.py "dist/CrystalX LCD"
+
+      - name: Download PawnIO and Inno Setup
+        shell: pwsh
+        run: |
+          function Get-Checked($url, $sha256, $out) {
+            Invoke-WebRequest -Uri $url -OutFile $out
+            $hash = (Get-FileHash $out -Algorithm SHA256).Hash
+            if ($hash -ne $sha256) { throw "${out}: SHA-256 is $hash, expected $sha256" }
+            $signature = Get-AuthenticodeSignature $out
+            if ($signature.Status -ne "Valid") { throw "${out}: signature is $($signature.Status)" }
+            "${out}: checksum and signature OK ($($signature.SignerCertificate.Subject))"
+          }
+          New-Item -ItemType Directory -Force downloads | Out-Null
+          Get-Checked $env:PAWNIO_URL $env:PAWNIO_SHA256 downloads\PawnIO_setup.exe
+          Get-Checked $env:INNO_URL $env:INNO_SHA256 downloads\innosetup.exe
+          Start-Process downloads\innosetup.exe -Wait -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER',
+            '/PORTABLE=1', "/DIR=`"$env:GITHUB_WORKSPACE\inno`""
+
+      - name: Build the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          & "$env:GITHUB_WORKSPACE\inno\ISCC.exe" /Q "/DAppVersion=$version" `
+            "/DPawnIOSetup=$env:GITHUB_WORKSPACE\downloads\PawnIO_setup.exe" packaging\installer.iss
+          if ($LASTEXITCODE) { throw "The installer build failed" }
+          $name = "CrystalX-LCD-Setup-$version.exe"
+          $sha256 = (Get-FileHash "dist\$name" -Algorithm SHA256).Hash.ToLower()
+          "$sha256  $name" | Out-File "dist\$name.sha256" -Encoding ascii -NoNewline
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$sha256" >> $env:GITHUB_OUTPUT
+          "$name  $sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: CrystalX-LCD-Setup-${{ steps.version.outputs.version }}
+          path: |
+            dist/${{ steps.installer.outputs.name }}
+            dist/${{ steps.installer.outputs.name }}.sha256
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $name = "${{ steps.installer.outputs.name }}"
+          @"
+          ## Install
+
+          1. Download **$name** below.
+          2. Run it. Windows may say "Windows protected your PC" because the installer is not
+             code-signed yet: click **More info**, then **Run anyway**.
+          3. Follow the steps. The clock appears on the case screen when it finishes.
+
+          Close the vendor's **LCD Control** first - only one program can use the screen.
+          Full instructions: [README](https://github.com/${{ github.repository }}#readme)
+
+          ## Check the download
+
+          SHA-256 of ``$name``:
+
+          ``````
+          ${{ steps.installer.outputs.sha256 }}
+          ``````
+
+          In PowerShell: ``Get-FileHash $name``
+          "@ | Out-File release-notes.md -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME "dist\$name" "dist\$name.sha256" `
+            --title "CrystalX LCD $version" --notes-file release-notes.md

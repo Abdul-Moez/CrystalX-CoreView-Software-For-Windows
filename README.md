@@ -1,162 +1,123 @@
 # CrystalX CoreView LCD for Windows
 
-Show an animated GIF with a clock, the date and live PC stats (CPU and GPU
-usage and temperature, RAM, drives, network) on the LCD screen of a
-**CrystalX CoreView V-950** PC case — without the vendor's LCD Control app.
+Show an animated GIF or your own picture with a clock, the date and live PC
+stats (CPU and GPU usage and temperature, RAM, drives, network) on the LCD
+screen of a **CrystalX CoreView V-950** PC case — without the vendor's LCD
+Control app.
 
 This is an unofficial project. It is not made by or affiliated with CrystalX or
 the makers of LCD Control.
 
-- [What you need](#what-you-need)
-- [Setup, step by step](#setup-step-by-step)
-- [Everyday use](#everyday-use)
-- [Start automatically with Windows](#start-automatically-with-windows-optional)
-- [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional)
-- [Change what the screen shows](#change-what-the-screen-shows-optional)
+- [Install](#install)
+- [Using the app](#using-the-app)
+- [Update or uninstall](#update-or-uninstall)
+- [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows)
 - [If something goes wrong](#if-something-goes-wrong)
-- [Want to know how it works?](#want-to-know-how-it-works)
+- [Other ways to run it, and how it works](#other-ways-to-run-it-and-how-it-works)
 - [License](#license)
 
 ---
 
-## What you need
+## Install
 
-- **A CrystalX CoreView V-950 case**, with the LCD's USB cable plugged into the
-  motherboard, as it comes from the factory.
-- **Windows 10 or 11**, 64-bit.
-- **Python 3.10 or newer — but not 3.13.0**, which has a bug that opens a
-  black window when the clock starts with Windows. Step 1 below shows how to
-  install it. Tested with Python 3.13.5.
-- **An internet connection**, only during setup.
-- **For the CPU temperature only: PawnIO 2.2.0**, a free driver, installed once
-  from **https://pawnio.eu/** — see [Step 4](#step-4--install-pawnio-for-cpu-temperature).
-  Everything else works without it.
+**You need:** the CrystalX CoreView V-950 case with the LCD's USB cable plugged
+into the motherboard (as it comes from the factory), and Windows 10 or 11,
+64-bit. Nothing else — the installer contains everything.
 
----
+1. **Close the vendor's LCD Control app** if it's running. Only one program can
+   use the screen at a time. If you can't find its window, look for its icon
+   near the clock in the bottom-right corner, or end **LCD Control** in Task
+   Manager.
 
-## Setup, step by step
+2. **Download the installer.** Open the
+   **[latest release](https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows/releases/latest)**
+   and click **`CrystalX-LCD-Setup-<version>.exe`** under *Assets*.
 
-You only do this once. It takes about five minutes.
+3. **Run it.** Windows may say **"Windows protected your PC"** — the installer
+   isn't code-signed yet, so Windows doesn't recognise the publisher. Click
+   **More info**, then **Run anyway**. Then click **Yes** when Windows asks for
+   administrator permission.
 
-### Step 1 — Install Python
+4. **Click through the steps:**
+   - the license (GPL v3) — click **I accept** and **Next**;
+   - if LCD Control is set to start with Windows, a box offers to stop that —
+     leave it ticked unless you want to keep using LCD Control;
+   - **Install**, then **Finish** (with *Open CrystalX LCD* ticked).
 
-Skip this step if you already have Python 3.10 or newer (other than 3.13.0 —
-`setup.cmd` tells you if yours won't work).
+Within a few seconds the case screen shows the clock, the date and your PC's
+stats, and the CrystalX LCD window opens.
 
-1. Go to **https://www.python.org/downloads/windows/** and download the latest
-   **Windows installer (64-bit)**.
-2. Run it. On the first screen, tick **"Add python.exe to PATH"**, then click
-   **Install Now**.
+**What the installer puts on your PC**, so nothing is a surprise:
 
-### Step 2 — Download this project
-
-1. At the top of this page on GitHub, click the green **Code** button, then
-   **Download ZIP**.
-2. Right-click the downloaded ZIP file and choose **Extract All…**.
-3. Put the extracted folder somewhere permanent with a short path, for example
-   `C:\Users\<you>\Documents\crystalx-lcd`. Don't run it from inside the ZIP,
-   and don't move the folder later if you set up autostart.
-
-If you use git, `git clone` works just as well.
-
-### Step 3 — Run setup
-
-Open the folder and double-click **`setup.cmd`**.
-
-A black window opens and installs the libraries the project needs. When it
-says **"Setup complete"**, press any key to close it.
-
-If Windows asks whether you want to run the file, choose **Run** (or
-**More info → Run anyway**). It only runs the setup described here.
-
-### Step 4 — Install PawnIO (for CPU temperature)
-
-Skip this if you don't need the CPU temperature — it will just show `--`.
-
-Windows only lets drivers read the CPU's temperature sensor, so this uses
-**PawnIO**, a small free driver signed by Microsoft (the same one
-LibreHardwareMonitor uses).
-
-1. Go to **https://pawnio.eu/** and download the installer (version 2.2.0 was
-   tested).
-2. Run it and click through. Windows asks for administrator permission — click
-   **Yes**.
-
-### Step 5 — Close the vendor's LCD Control app
-
-Only one program can drive the screen at a time.
-
-1. If **LCD Control** is running, close it. If you can't find its window, look
-   for its icon in the system tray (bottom-right, near the clock), or end
-   **LCD Control** in Task Manager.
-2. LCD Control usually starts itself at every login and takes the screen back.
-   See [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional)
-   to turn that off.
-
-### Step 6 — Start it
-
-Double-click **`run-clock.cmd`**.
-
-Windows asks **"Do you want to allow this app to make changes to your
-device?"** — click **Yes**. Reading the CPU temperature needs administrator
-rights, just like LCD Control. If you click **No**, it runs anyway and the CPU
-temperature shows `--`.
-
-Within a few seconds the case screen shows the GIF with the clock, date and
-stats. **Keep the black window open** — you can minimise it. Closing it stops
-the display, and the screen goes blank a moment later.
-
-That's it.
-
----
-
-## Everyday use
-
-| To… | Do this |
+| What | Why |
 |---|---|
-| Start the clock and stats | Double-click `run-clock.cmd` |
-| Stop it | Close its black window (or press `Ctrl+C` in it) |
-| Show just the GIF, no clock or stats | Double-click `run-gif.cmd` |
-| Go back to the vendor's app | Stop this first, then open LCD Control |
-
-**The "Welcome" screen at power-on** is built into the screen itself and can't
-be changed. It shows until something starts sending pictures, then goes blank
-if nothing does. Autostart (below) makes the clock take over at login.
+| The app, in `C:\Program Files\CrystalX LCD` | The program itself |
+| A Windows service, **CrystalX LCD** | Drives the screen from the moment the PC starts — even before you log in — and reads the CPU temperature without asking for admin rights |
+| A Start menu entry, **CrystalX LCD** | Opens the app window |
+| The app's icon near the clock at every login | Quick access; it starts quietly, without opening a window |
+| The **PawnIO** driver, only if you don't have it | Windows only lets drivers read the CPU temperature. PawnIO is free, open source and signed by Microsoft |
 
 ---
 
-## Start automatically with Windows (optional)
+## Using the app
 
-This starts the clock every time you log in — hidden, with the temperatures,
-and **without the admin prompt**. It's the same trick LCD Control uses to start
-itself.
+Open **CrystalX LCD** from the Start menu, or click its icon near the clock
+(it may be hidden behind the **^** arrow). Right-clicking the icon gives
+**Show** and **Quit**.
 
-**To turn it on:** double-click **`autostart-on.cmd`** and click **Yes** on the
-Windows prompt (setting it up needs administrator rights once). It takes
-effect from your next login.
+The window has everything in one place, with a preview of the screen on the
+left:
 
-If LCD Control is also set to start at login, it asks whether to turn that off
-— press **Y**, or the two will fight over the screen. LCD Control still works
-if you open it yourself later.
+- **Display** — shows what the screen is doing, for example *Showing on COM5*.
+  **Stop display** turns the screen off and frees it for other programs such as
+  LCD Control; **Start display** brings the clock back. No admin prompts.
+- **Picture** — **Choose file…** to use your own GIF or picture (GIF, PNG, JPEG,
+  WEBP or BMP), or **Use default** for the rooftop GIF. Then choose how it
+  fills the tall screen:
+  - **Fill** crops it to cover the whole screen;
+  - **Fit** shows the whole picture, with the empty space filled by
+    **blurred edges** or a **solid colour** you pick.
 
-**To turn it off:** double-click **`autostart-off.cmd`** and click **Yes**. It
-also stops the hidden clock straight away.
+  The preview updates as you go. Click **Apply** to send it to the screen, or
+  **Undo changes**.
+- **Options** — **Start display with Windows** decides whether the clock comes
+  on by itself when the PC starts.
+- **Open log** shows what the app has been doing — useful if something goes
+  wrong.
 
-- If you move the project folder, run `autostart-on.cmd` again from the new
-  place.
-- To stop the hidden clock just for now, end **pythonw.exe** in Task Manager
-  (Details tab). It comes back at your next login.
-- While the hidden clock runs, `run-clock.cmd` can't start — the screen is
-  already in use.
+**Closing the window** with **X** only hides it; the clock keeps running.
+**Quit** (right-click the icon) stops the display and closes the app until your
+next login.
+
+**The "Welcome" screen** you see while the PC boots is built into the case
+screen and can't be changed. The app takes over as soon as Windows starts.
 
 ---
 
-## Stop LCD Control starting with Windows (optional)
+## Update or uninstall
+
+**To update:** download the newer `CrystalX-LCD-Setup-<version>.exe` from the
+[releases page](https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows/releases)
+and run it. Your picture and settings are kept.
+
+**To uninstall:** open **Settings → Apps**, find **CrystalX LCD** and click
+**Uninstall**. This removes the app, the service, the Start menu entry, the
+icon at login, and your chosen picture, settings and log.
+
+**PawnIO stays installed** on purpose: it's a shared driver that other
+programs (for example LibreHardwareMonitor or FanControl) also use. If you
+want it gone too, uninstall **PawnIO** from the same list.
+
+---
+
+## Stop LCD Control starting with Windows
 
 LCD Control starts itself at every login through a Windows scheduled task
 called **`LCD ControlPowerBoot`**. That's why it doesn't show up in Task
 Manager's Startup tab, and its own autostart switch doesn't always remove it.
-While it runs, it holds the screen and this project can't use it.
+While it runs, it holds the screen and this app can't use it.
+
+The installer offers to switch this off for you. To do it yourself:
 
 **What the command below does:**
 
@@ -200,128 +161,57 @@ If that says "The system cannot find the file specified", the task has been
 removed (LCD Control's own switch does that). Turn on the autostart option
 inside LCD Control instead, and it creates the task again.
 
-`autostart-on.cmd` also offers to switch this task off for you when you set
-up this project's autostart.
-
----
-
-## Change what the screen shows (optional)
-
-The bottom box shows seven readings by default: CPU usage and temperature, GPU
-usage and temperature, RAM usage, drive activity and network speed. You can
-pick others.
-
-1. Right-click **`run-clock.cmd`** and choose **Edit** (it opens in Notepad).
-2. Find the line starting with `venv-win\Scripts\python.exe clock_win.py`.
-3. Add `--slots` and the readings you want at the end of that line, separated by
-   commas. For example:
-
-   ```
-   venv-win\Scripts\python.exe clock_win.py "retro_pixel_guy_smoking_on_rooftop.gif" --slots cpu,clock,ram,vram,uptime %*
-   ```
-
-   Inside this file, write a percent sign twice: `ram%%` for RAM usage in
-   percent, `disk%%` for drive activity.
-
-4. Save, close the black window if it's running, and double-click
-   `run-clock.cmd` again.
-
-| Name | Shows |
-|---|---|
-| `cpu` | CPU usage in % |
-| `cputemp` | CPU temperature (needs PawnIO and the admin prompt answered Yes) |
-| `clock` | Current CPU speed, including boost |
-| `gpu` | GPU usage in % |
-| `gputemp` | GPU temperature |
-| `vram` | Video memory in use |
-| `ram` | RAM in use, in GB |
-| `ram%` | RAM in use, in % |
-| `disk%` | How hard the drives are working right now |
-| `diskio` | Drive read + write speed |
-| `storage` | Space used across all drives, in % |
-| `disk` | Free space on the Windows drive |
-| `net` | Download / upload speed together |
-| `netdown`, `netup` | Download or upload speed on its own |
-| `procs` | Number of running programs and processes |
-| `uptime` | Time since Windows started |
-
-Readings update every 2 seconds. They fill the box two per row, and an odd one
-at the end is centred.
-
-**Using your own GIF, fonts, sizes or frame rate:** see
-[Command-line options](docs/HOW-IT-WORKS.md#command-line-options). Be careful
-with bigger pictures: the screen can only take about 472,000 pixels per frame,
-and anything larger comes out scrambled.
-
 ---
 
 ## If something goes wrong
 
-**"Python 3.10 or newer was not found"** (from `setup.cmd`)
-Python isn't installed, or "Add python.exe to PATH" wasn't ticked. Do
-[Step 1](#step-1--install-python) again, then run `setup.cmd` again.
+The **Display** line in the app window usually says what's wrong.
 
-**"Python 3.13.0 was found, but it has a bug…"** or **"The venv-win folder
-was made with Python 3.13.0…"** (from `setup.cmd`)
-Install the latest Python from python.org, delete the `venv-win` folder if the
-message says so, and run `setup.cmd` again.
+**"Waiting: COM5 is busy -- close LCD Control.exe …"** (the number may differ)
+Another program is using the screen — almost always LCD Control. Close it (or
+end **LCD Control** in Task Manager); the app notices within a few seconds and
+takes over. To stop it coming back at every login, see
+[Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows).
 
-**A black window appears at login, and the screen stays black**
-Your `venv-win` was made with Python 3.13.0 (see the message above). Clicking
-into that window pauses the clock — press **Esc** to get it going again, then
-fix it for good by installing a newer Python, deleting `venv-win` and running
-`setup.cmd` again.
+**"Waiting: panel 33c3:f101 not found -- is the case plugged in?"**
+Windows can't see the case screen. Check the LCD's USB cable is connected to
+the motherboard. In Device Manager, under **Ports (COM & LPT)**, you should see
+**USB Serial Device (COMx)**. The app retries by itself every few seconds.
 
-**"venv-win is missing. Double-click setup.cmd first."**
-Setup hasn't been run in this folder yet. Do [Step 3](#step-3--run-setup).
-
-**"COM5 is busy -- close LCD Control.exe"** (the number may differ)
-Another program is using the screen — usually LCD Control, sometimes another
-copy of this project (including the autostart one). Close it, or end
-**LCD Control** / **Python** / **pythonw.exe** in Task Manager, then try again.
-
-**"panel 33c3:f101 not found -- is the case plugged in?"**
-Windows can't see the screen. Check the LCD's USB cable is connected to the
-motherboard. In Device Manager, under **Ports (COM & LPT)**, you should see
-**USB Serial Device (COMx)**.
-
-**The screen shows the picture for a moment, then goes blank**
-The program stopped. The screen only shows a picture while something keeps
-sending it. Start `run-clock.cmd` again and read any message in its window.
-
-**The picture is torn or scrambled**
-The picture being sent is too big — this happens if you changed `--width` or
-used another GIF. Go back to the default settings.
-
-**CPU Temp shows `--`**
-The first line in the black window says why. Usually one of these:
-- **"needs administrator rights"** — you clicked No on the Windows prompt.
-  Close the window and start `run-clock.cmd` again.
-- **"needs the PawnIO driver"** — do [Step 4](#step-4--install-pawnio-for-cpu-temperature).
-
-**"temperatures unavailable: … run setup.cmd again"**
-The temperature parts aren't installed or are blocked by Windows — common
-after downloading a new version. Double-click `setup.cmd` again.
+**"CPU temperature: needs the PawnIO driver from pawnio.eu"**
+The PawnIO driver is missing or was removed. Run the installer again (it adds
+PawnIO), or install it from **https://pawnio.eu/**.
 
 **A reading shows `--`**
-That reading isn't available on your PC (for example, no GPU counters), or it's
-the first two seconds after starting — speed readings need two samples.
+That reading isn't available on your PC (for example, no GPU counters), or the
+display has only just started — speed readings need two samples.
 
-**Autostart is on but nothing shows after login**
-Something else took the screen first — usually LCD Control starting itself.
-See [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional).
+**"Windows protected your PC" when running the installer**
+Expected for now: the installer isn't code-signed. Click **More info**, then
+**Run anyway**. To be sure the file is genuine, compare its checksum with the
+one on the release page — in PowerShell: `Get-FileHash CrystalX-LCD-Setup-<version>.exe`.
 
-**Nothing on the screen and no error**
-Try `run-gif.cmd`. If the plain GIF works, the problem is in the clock and
-stats part, not the connection to the screen.
+**I can't find the icon near the clock**
+Click the **^** arrow next to the icons; Windows hides new icons there at first.
+You can drag it out to keep it visible. Or open **CrystalX LCD** from the Start
+menu.
+
+**"The CrystalX LCD service is not installed."**
+Something removed the service. Run the installer again to repair it.
+
+**Anything else**
+Click **Open log** in the app window, and include what it shows when you
+[report an issue](https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows/issues).
 
 ---
 
-## Want to know how it works?
+## Other ways to run it, and how it works
 
-- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the protocol, the
-  screen's hardware limits and how they were found, how each reading is
-  measured, what the vendor app revealed, and what didn't work.
+- **[docs/SCRIPTS.md](docs/SCRIPTS.md)** — run it straight from the source
+  files with Python, without installing the app.
+- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the protocol, the screen's
+  hardware limits and how they were found, how each reading is measured, how
+  the app, service and installer work, and what didn't work.
 - **[AGENTS.md](AGENTS.md)** — rules for AI coding assistants working on this
   project.
 
@@ -346,3 +236,7 @@ commercial purposes, as long as:
 
 The [LICENSE](LICENSE) file is the legally binding text; this summary is only a
 guide.
+
+The app bundles other open-source components, each under its own license — see
+the `licenses` folder in the installed app, and
+[lib/LibreHardwareMonitor/THIRD-PARTY-NOTICES.md](lib/LibreHardwareMonitor/THIRD-PARTY-NOTICES.md).

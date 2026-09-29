@@ -45,9 +45,10 @@ import time
 from io import BytesIO
 
 import psutil
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
-from lcd_win import MAGIC, MAX_PIXELS, Panel, install_handlers, load_frames
+from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, Panel, install_handlers,
+                     load_frames)
 
 # %#I / %#d drop the leading zero on Windows. The %-I form found in many
 # Python examples is not supported here and raises ValueError.
@@ -252,6 +253,13 @@ SLOTS = {
 }
 # Only these need LibreHardwareMonitor, so it is loaded only when one is shown.
 TEMP_SLOTS = ("cputemp", "gputemp")
+# Typical readings, for previews that should not read the PC (--sample-stats).
+SAMPLE_VALUES = {
+    "cpu": "12%", "gpu": "8%", "ram": "7.5G", "ram%": "49%", "vram": "0.9G",
+    "clock": "4.02G", "net": "0.4/0.1", "netdown": "412K/s", "netup": "96K/s",
+    "diskio": "1.1M/s", "disk%": "2%", "storage": "66%", "disk": "64G",
+    "procs": "229", "uptime": "1h 41m", "cputemp": "47°C", "gputemp": "51°C",
+}
 # Slots fill the grid two per row; an odd one at the end is centred across the
 # full width, which is why this default has seven. Each usage sits beside its
 # temperature.
@@ -440,6 +448,27 @@ class Metrics:
         return self._cache
 
 
+class SampleMetrics:
+    """Stands in for Metrics in a preview: fixed example values, no sensors."""
+
+    temps = None
+
+    def __init__(self, slots):
+        self.slots = slots
+
+    def labels(self):
+        return [SLOTS[name][0] for name in self.slots]
+
+    def values(self):
+        return tuple(SAMPLE_VALUES[name] for name in self.slots)
+
+    def refresh(self):
+        pass
+
+    def nic(self):
+        return "example values"
+
+
 def frost(img, box, blur, darken, corner):
     """Blur and dim a rounded region in place, so text over it stays legible."""
     x0, y0, x1, y1 = (int(v) for v in box)
@@ -483,11 +512,18 @@ def render(frame, items, quality, panels=(), blur=6, darken=0.5, corner=24):
     return buf.getvalue()
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", help="GIF or image to play under the overlay")
     ap.add_argument("--width", type=int, default=320)
+    ap.add_argument("--fit", choices=FIT_MODES,
+                    help="place the picture on a panel-shaped canvas: fill "
+                         "(crop to cover), blur (whole picture, blurred "
+                         "edges) or color (whole picture, --fit-color edges). "
+                         "Default: scale to --width and keep the shape")
+    ap.add_argument("--fit-color", type=ImageColor.getrgb, default="#000000",
+                    help="edge colour for --fit color (default #000000)")
     ap.add_argument("--fps", type=float, default=10.0)
     ap.add_argument("--quality", type=int, default=88)
     ap.add_argument("--port", help="COM port (default: located by VID:PID)")
@@ -510,6 +546,9 @@ def main():
     ap.add_argument("--preview", metavar="FILE",
                     help="save one frame to FILE and exit, without opening the "
                          "panel -- lets you tune layout while it keeps running")
+    ap.add_argument("--sample-stats", action="store_true",
+                    help="with --preview: show example readings instead of "
+                         "this PC's, without loading any sensors")
     ap.add_argument("--no-frost", action="store_true",
                     help="no blurred panel behind the text")
     ap.add_argument("--frost-blur", type=float, default=9.0)
@@ -522,9 +561,21 @@ def main():
                     help="gap between the panel edge and the text, sideways")
     ap.add_argument("--frost-pad-y", type=int, default=24,
                     help="same, above and below")
-    args = ap.parse_args()
+    return ap
 
-    frames = load_frames(args.source, args.width)
+
+def main(argv=None, stop=None, log=None):
+    """Run the clock until stopped.
+
+    From the command line this parses sys.argv and runs until Ctrl+C. The
+    service calls it with its own `argv`, a threading.Event as `stop`, and a
+    `log` function; it then returns once `stop` is set, with the port closed.
+    Errors still end it with SystemExit(message), which the service catches.
+    """
+    log = log or (lambda message: print(message, flush=True))
+    args = build_parser().parse_args(argv)
+
+    frames = load_frames(args.source, args.width, args.fit, args.fit_color)
     w, h = frames[0].size
     if w * h > MAX_PIXELS:
         sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
@@ -553,10 +604,15 @@ def main():
     date_font = fit_font(path, "(Wed) 30-Sep-2026", text_width,
                          args.date_size or avail)
 
-    stats = None if args.no_stats else Metrics(slots)
-    if stats and stats.temps:
-        atexit.register(stats.temps.close)
-        print(stats.temps.status(), flush=True)
+    if args.no_stats:
+        stats = None
+    elif args.preview and args.sample_stats:
+        stats = SampleMetrics(slots)
+    else:
+        stats = Metrics(slots)
+    temps = stats.temps if stats else None
+    if temps:
+        log(temps.status())
     # Each column gets half the width, less a gap so they never collide, but a
     # centred odd slot gets the lot. The two groups are therefore sized
     # against different limits and whichever comes out smaller wins. Sizing
@@ -632,41 +688,61 @@ def main():
         return items
 
     if args.preview:
-        if stats:
-            # Prime, wait, then force a fresh sample: CPU load and the
-            # throughput slots are deltas and read as 0 or "--" until there
-            # are two samples to subtract.
-            stats.values()
-            time.sleep(0.6)
-            stats.refresh()
-        clock, vals = tick()
-        compose(frames[0], build_items(clock, vals), panels, args.frost_blur,
-                args.frost_dark, args.frost_corner).save(args.preview)
+        try:
+            if isinstance(stats, Metrics):
+                # Prime, wait, then force a fresh sample: CPU load and the
+                # throughput slots are deltas and read as 0 or "--" until
+                # there are two samples to subtract.
+                stats.values()
+                time.sleep(0.6)
+                stats.refresh()
+            clock, vals = tick()
+            compose(frames[0], build_items(clock, vals), panels, args.frost_blur,
+                    args.frost_dark, args.frost_corner).save(args.preview)
+        finally:
+            if temps:
+                temps.close()
         following = (f", following {stats.nic()}" if stats
                      and any(s.startswith("net") for s in slots) else "")
-        print(f"preview written to {args.preview} ({w}x{h}), "
-              f"clock {time_font.size}px / date {date_font.size}px"
-              f"{following} -- panel untouched", flush=True)
+        log(f"preview written to {args.preview} ({w}x{h}), "
+            f"clock {time_font.size}px / date {date_font.size}px"
+            f"{following} -- panel untouched")
         return
 
     header = struct.pack("<IHHHH", MAGIC, w, h, 0, 1)
-    panel = Panel(args.port)
-    atexit.register(panel.close)
-    install_handlers()
-    print(f"{len(frames)} frames at {w}x{h} ({w * h:,} px), {args.fps:g} FPS, "
-          f"on {panel.port}, font {os.path.basename(path)}, "
-          f"clock {time_font.size}px"
-          + ("" if stats is None else
-             f", slots {'/'.join(slots)} at y={stats_y} "
-             f"(labels {label_font.size}px, values {value_font.size}px)"),
-          flush=True)
+    try:
+        panel = Panel(args.port)
+    except BaseException:
+        if temps:
+            temps.close()
+        raise
+    if stop is None:
+        # Command line only: signal handlers can only be set from the main
+        # thread, and the service stops the loop through `stop` instead.
+        atexit.register(panel.close)
+        install_handlers()
+    log(f"{len(frames)} frames at {w}x{h} ({w * h:,} px), {args.fps:g} FPS, "
+        f"on {panel.port}, font {os.path.basename(path)}, "
+        f"clock {time_font.size}px"
+        + ("" if stats is None else
+           f", slots {'/'.join(slots)} at y={stats_y} "
+           f"(labels {label_font.size}px, values {value_font.size}px)"))
+    try:
+        _stream(panel, header, frames, tick, build_items, panels, args, stop)
+    finally:
+        panel.close()
+        if temps:
+            temps.close()
 
+
+def _stream(panel, header, frames, tick, build_items, panels, args, stop):
+    """Send frames forever, or until `stop` is set."""
     # Re-rendering every frame each tick is wasteful, so cache per frame and
     # only redraw when the displayed text actually changes.
     cache = {}
     period = 1.0 / args.fps
     i = 0
-    while True:
+    while stop is None or not stop.is_set():
         start = time.time()
         clock, vals = tick()
         stamp = clock + vals
@@ -682,7 +758,11 @@ def main():
             payload = cached[1]
         panel.send(payload)
         i += 1
-        time.sleep(max(0, period - (time.time() - start)))
+        wait = max(0, period - (time.time() - start))
+        if stop is None:
+            time.sleep(wait)
+        else:
+            stop.wait(wait)
 
 
 if __name__ == "__main__":
