@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """Play a GIF on the CrystalX CoreView panel with a clock and system stats.
 
-Windows port of clock.py. The rendering is the same -- text drawn over the
-frame, outlined and sitting on a frosted panel, so the output never grows
-past the panel's pixel ceiling. What differs is everything the OS supplies:
+Text is drawn over each frame, outlined and sitting on a frosted panel, so
+the output never grows past the panel's pixel ceiling.
 
-  transport   a COM port rather than raw USB bulk (see lcd_win.py)
-  frames      Pillow rather than ImageMagick, so nothing extra to install
-  fonts       Windows font directory rather than fc-match
-  time        %#I / %#d, since glibc's %-I raises ValueError on Windows
-  stats       load and memory rather than temperatures (see Stats below)
-
-Weather is left out: it needs a Nerd Font for its glyphs and adds a network
-dependency for something the Linux build already covers.
+  transport   the panel's COM port (see lcd_win.py)
+  frames      Pillow, so nothing extra to install
+  fonts       the Windows font directories
+  stats       load and memory from psutil and Windows performance counters,
+              no temperatures yet (see Metrics below)
 
 Usage:
     clock_win.py <source> [--width 320] [--fps 10] [--font consolab.ttf]
@@ -31,8 +27,8 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from lcd_win import MAGIC, MAX_PIXELS, Panel, install_handlers, load_frames
 
-# %#I is the Windows no-padding flag. glibc's %-I, which clock.py uses,
-# raises ValueError on this platform -- the output is otherwise identical.
+# %#I / %#d drop the leading zero on Windows. The %-I form found in many
+# Python examples is not supported here and raises ValueError.
 TIME_FMT = "%#I:%M %p"          # 3:25 PM
 DATE_FMT = "(%a) %#d-%b-%Y"     # (Sun) 20-Sep-2026
 
@@ -40,13 +36,10 @@ FONT_DIRS = [
     os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts"),
 ]
-# So the Linux default and other fontconfig-style names still do something
-# sensible if they get passed through by habit.
+# Friendly names --font accepts, mapped to the bold file of that family.
 FONT_ALIASES = {
-    "monospace": "consolab.ttf",
     "consolas": "consolab.ttf",
     "jetbrains mono": "JetBrainsMono-Bold.ttf",
-    "liberation sans": "LiberationSans-Bold.ttf",
     "segoe ui": "segoeuib.ttf",
     "arial": "arialbd.ttf",
     "courier new": "courbd.ttf",
@@ -54,14 +47,10 @@ FONT_ALIASES = {
 
 
 def resolve_font(spec):
-    """Accept a font file, a name in the Windows font directories, or an alias.
-
-    Windows has no fc-match, so this walks the font directories itself.
-    """
+    """Accept a font file, a name in the Windows font directories, or an alias."""
     if os.path.isfile(spec):
         return spec
-    # Tolerate fontconfig patterns like "monospace:bold".
-    base = spec.split(":")[0].strip().lower()
+    base = spec.strip().lower()
     candidates = [spec, FONT_ALIASES.get(base, ""), base, base + ".ttf", base + ".ttc"]
     for name in filter(None, candidates):
         if os.path.isfile(name):
@@ -246,9 +235,9 @@ class Metrics:
     """The readings Windows gives up without extra software or elevation.
 
     Temperatures are deliberately absent. Windows exposes them only from
-    kernel mode, so showing CPU or GPU temperature the way clock.py does means
-    running something like LibreHardwareMonitor and accepting its ring-0
-    driver. Adding one later is a new entry in SLOTS and nothing else.
+    kernel mode, so showing CPU or GPU temperature means running something
+    like LibreHardwareMonitor and its kernel driver. Adding one later is a new
+    entry in SLOTS and nothing else.
 
     Values refresh on an interval rather than per frame: CPU load is a delta
     between samples, so a short window reads as noise, and every changed value

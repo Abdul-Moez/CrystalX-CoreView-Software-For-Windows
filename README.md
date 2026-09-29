@@ -5,8 +5,8 @@ the vendor's software. Plays a GIF on the panel with a clock, date and live
 system stats overlaid.
 
 **Read this file before changing anything.** The panel has several undocumented
-quirks that took a long session of trial and error to find, first on Linux and
-then here. They are written down so nobody has to rediscover them.
+quirks that took a long session of trial and error to find. They are written
+down so nobody has to rediscover them.
 
 ```cmd
 run-clock.cmd
@@ -14,10 +14,6 @@ run-clock.cmd
 
 Close the vendor's **LCD Control.exe** first — it holds the COM port open and
 only one program can have it.
-
-> A Linux build of this exists separately (`lcd.py` / `clock.py`, using pyusb
-> and a detached `cdc_acm` driver). This folder is Windows-only; a copy of the
-> Linux version is kept at `E:\crystalx-lcd-BACKUP`.
 
 ---
 
@@ -69,8 +65,8 @@ In Python: `struct.pack("<IHHHH", 0x0008100A, w, h, 0, 1)`
 These were each found the hard way. Changing any of them breaks the display in
 ways that look like random corruption and are very hard to diagnose.
 
-The first three are properties of the **panel**, not of the operating system,
-and are equally true of the Linux build.
+The first four are properties of the **panel** itself. The rest are about how
+Windows and Python talk to it.
 
 ### 1. Images are rotated 180° before encoding
 
@@ -78,12 +74,14 @@ The panel is physically mounted upside down. Every frame goes through
 `transpose(Image.ROTATE_180)` **before** being encoded to JPEG. The panel does
 not do this for you.
 
-### 2. Never send more than ~500,000 pixels per frame
+### 2. Never send more than ~472,000 pixels per frame
 
 This is the single most important constraint and the least obvious.
 
-The panel is 480 × 1920 (921,600 px), but **it cannot decode a frame that
-large**. Sending a full-panel image produces a flickering, torn, scrambled mess.
+"Pixels" means width × height of the frame being sent — the total number of
+dots in the picture. The panel is 480 × 1920 (921,600 px), but **it cannot
+decode a frame that large**. Sending a full-panel image produces a flickering,
+torn, scrambled mess.
 
 Measured on this hardware:
 
@@ -91,12 +89,32 @@ Measured on this hardware:
 |---|---|---|
 | 234 × 1079 | 252,486 | clean |
 | 300 × 1383 | 414,900 | clean |
-| 320 × 1476 | 472,320 | clean — **what we use** |
+| 320 × 1476 | 472,320 | clean — **what we use, and the maximum** |
+| 324 × 1494 | 484,056 | corrupt |
+| 328 × 1512 | 495,936 | corrupt |
+| 332 × 1531 | 508,292 | corrupt |
 | 334 × 1540 | 514,360 | corrupt |
 | 480 × 1920 | 921,600 | badly corrupt |
 
-`MAX_PIXELS = 500_000` in `lcd_win.py` enforces this. The scripts refuse to run
-rather than let you produce a broken display. **Do not raise it.**
+The ceiling lies somewhere between **472,320 (clean) and 484,056 (corrupt)**.
+For the rooftop GIF that makes **320 px the widest usable width** — the height
+follows the width to keep the GIF's shape, so even 4 px wider already breaks.
+Widths 321–323 were not tested; they would gain at most 3 px, which is not
+worth it.
+
+The 324–332 rows were measured on 2026-09-29, after this section had claimed a
+~500k limit. The method: a labelled test pattern (grid, corner-to-corner
+diagonals, coloured corners, numbered bands, with the size printed on it) cycled
+through 320/324/328/332/334 on the real panel while the user reported which
+looked right. Only 320 was clean. **Do not repeat this experiment hoping for
+more width — it has been done.**
+
+> **Known gap:** `MAX_PIXELS = 500_000` in `lcd_win.py` was set before the
+> 324–332 rows were measured, so it is looser than the real ceiling. The scripts
+> refuse to run above 500,000 px, but **widths 324–329 pass that check and still
+> show a scrambled screen.** Treat 320 as the maximum regardless of what the
+> check allows. Lowering `MAX_PIXELS` to about `475_000` would close the gap.
+> **Never raise it.**
 
 ### 3. The panel does not scale images up
 
@@ -137,11 +155,11 @@ to something else the moment it is plugged into a different header.
 Opening the port fails with "Access is denied" if something else holds it. Stop
 the service, or the vendor app, before running a script by hand.
 
-### 8. `%-I` crashes on Windows
+### 8. Use `%#I`, not `%-I`, to drop leading zeros
 
-The Linux build uses glibc's `%-I` / `%-d` no-padding flags. Windows uses the
-MSVC C runtime, where those raise `ValueError: Invalid format string`. The
-Windows equivalent is `%#I` / `%#d`, which produces byte-identical output.
+`TIME_FMT` and `DATE_FMT` use `%#I` / `%#d` so the clock reads `3:25`, not
+`03:25`. The `%-I` / `%-d` form found in many Python examples is not supported
+on Windows and raises `ValueError: Invalid format string`.
 
 ---
 
@@ -151,15 +169,16 @@ Windows equivalent is `%#I` / `%#d`, which produces byte-identical output.
 - Which GIF is played, its FPS, JPEG quality
 - Clock and date formats (`TIME_FMT`, `DATE_FMT` in `clock_win.py`)
 - Which stats are shown (`--slots`) and how often they refresh
-- Width, **as long as the result stays under `MAX_PIXELS`**
+- Width, **downwards only** — 320 is the maximum for the rooftop GIF, even
+  though `MAX_PIXELS` currently lets 324–329 through (see constraint 2)
 
 ---
 
 ## The important discovery
 
 **The vendor's Windows software drives the panel through a COM port, not
-through libusb.** This makes the Windows build far simpler than the Linux one:
-no libusb, no Zadig, no driver replacement, no administrator rights.
+through libusb.** So this project needs no libusb, no Zadig, no driver
+replacement and no administrator rights.
 
 The evidence, gathered on this machine:
 
@@ -170,11 +189,9 @@ The evidence, gathered on this machine:
 | Children of the composite device | exactly one, `USB Serial Device (COM5)` |
 | Opening COM5 while LCD Control.exe runs | `Access to the port 'COM5' is denied` |
 
-That last line is the proof: the vendor app holds the COM port exclusively.
-
-The Linux notes claim the vendor app "talks to the panel through `libusb0.sys`
-and looks for `\\.\libusb0-000X` device nodes". That was observed **under
-Wine**. The real Windows build does not use libusb at all.
+That last line is the proof: the vendor app holds the COM port exclusively. It
+ships a `libusb` folder in its install directory, but never installs or uses
+that driver for this panel.
 
 ### Why the COM port is the same wire
 
@@ -183,15 +200,10 @@ The device is a standard CDC-ACM composite:
 - **interface 0** — CDC control
 - **interface 1** — CDC data, bulk OUT endpoint `0x02`
 
-Endpoint `0x02` on interface 1 is exactly what the Linux driver writes to after
-detaching `cdc_acm`. On Windows, `usbser.sys` already owns that endpoint and
-exposes it as a COM port. Writing bytes to the port puts them on the same
-endpoint. Same wire, different door.
-
-This also explains the Linux note that writing to `/dev/ttyACM0` "does display
-an image, but is unreliable". On Linux that path goes through the tty line
-discipline, which mangles binary data unless the port is put in raw mode.
-Windows COM ports have no line discipline — bytes pass through untouched.
+Endpoint `0x02` on interface 1 is where the frame data goes. `usbser.sys` owns
+that endpoint and exposes it as a COM port, so writing bytes to the port puts
+them straight on the endpoint. Windows COM ports pass binary data through
+untouched, as long as flow control is off (constraint 5).
 
 ---
 
@@ -213,11 +225,10 @@ the port and the frame format are all fine.
 
 ## Setup
 
-One-time. Needs Python 3 on `PATH` and nothing else — no ImageMagick, no
-driver, no elevation.
+One-time. Needs Python 3 on `PATH` and nothing else — no driver, no elevation.
 
 ```cmd
-cd /d E:\crystalx-lcd
+cd /d F:\UsefullFiles\laragon\www\crystalx_lcd_windows
 python -m venv venv-win
 venv-win\Scripts\python.exe -m pip install Pillow pyserial psutil pywin32
 ```
@@ -277,11 +288,13 @@ venv-win\Scripts\python.exe clock_win.py retro_pixel_guy_smoking_on_rooftop.gif 
 run-clock.cmd --width 280
 ```
 
-If it refuses with an "over the pixel limit" message, lower `--width` until it
-fits. The limit is not negotiable — see above.
+A GIF with a different shape has a different maximum width. Pick a width where
+the startup line reports **472,320 px or fewer**. Don't rely on the "over the
+pixel limit" refusal: it only triggers above 500,000 px, and frames between
+~480,000 and 500,000 px pass it and still come out scrambled. The limit is not
+negotiable — see above.
 
-Images and GIFs only. Video would need ffmpeg; the Linux build got it free from
-ImageMagick, which is not used here.
+Images and GIFs only. Video would need ffmpeg.
 
 ---
 
@@ -415,10 +428,10 @@ the cost: raise the stats interval, lower `--fps`, or use `--no-stats`.
 
 ## Autostart
 
-Windows has no systemd. Use Task Scheduler:
+Use Task Scheduler:
 
 ```cmd
-schtasks /create /tn "CrystalX LCD" /tr "E:\crystalx-lcd\venv-win\Scripts\pythonw.exe E:\crystalx-lcd\clock_win.py E:\crystalx-lcd\retro_pixel_guy_smoking_on_rooftop.gif" /sc onlogon /rl limited /f
+schtasks /create /tn "CrystalX LCD" /tr "F:\UsefullFiles\laragon\www\crystalx_lcd_windows\venv-win\Scripts\pythonw.exe F:\UsefullFiles\laragon\www\crystalx_lcd_windows\clock_win.py F:\UsefullFiles\laragon\www\crystalx_lcd_windows\retro_pixel_guy_smoking_on_rooftop.gif" /sc onlogon /rl limited /f
 ```
 
 Note **`pythonw.exe`**, not `python.exe` — it runs without a console window.
@@ -465,7 +478,8 @@ writing. Check the console for a traceback.
 **Panel is torn or scrambled**
 
 Almost certainly the frame is too large. Check the reported pixel count on
-startup and reduce `--width`.
+startup: anything above 472,320 px is suspect, even if the script accepted it.
+Go back to `--width 320` or lower.
 
 **Stats show `--`**
 
@@ -489,17 +503,8 @@ it would *break* things — it unbinds `usbser.sys`, destroying the COM port tha
 both this and the vendor software depend on. There is no reason to touch the
 driver on Windows.
 
-**Running the vendor's software under Wine** (the Linux investigation). It
-installs and the UI runs, and Wine's `wineusb` can see the device, but the app
-talks through `libusb0.sys`, a kernel driver Wine has no equivalent for. Dead
-end — and, as it turns out, not what the app does on real Windows anyway.
-
-**Installing ImageMagick.** Pillow coalesces GIF frames correctly on its own —
-seeking a frame and converting composites it against the ones before it, which
-is what `-coalesce` does. The only thing lost is video input.
-
 **Blaming frame rate, JPEG size in bytes, chroma subsampling, or the header's
-`flag` field.** All were tested and ruled out on the Linux side. Frame rate from
+`flag` field.** All were tested on this panel and ruled out. Frame rate from
 0.33 to 120 FPS behaves identically. The real variable is always **pixel count**.
 
 **Chasing frame pacing, chunked writes or DTR handling when the panel was
@@ -507,6 +512,10 @@ blank.** All were suspected on Windows; none was the cause. The transport worked
 on the very first attempt — the frame simply needed to keep being sent. Measure
 before changing anything: if `write()` returns at ~15 MB/s with
 `out_waiting == 0`, the bytes reached the device and the fault is elsewhere.
+
+**Raising the width past 320 because `MAX_PIXELS` seemed to leave room.** The
+500k figure was a rounded guess; the panel already corrupts at 324 × 1494
+(484,056 px). Tested on the hardware on 2026-09-29 — see constraint 2.
 
 **Using `psutil.cpu_freq()` for a live clock, or `% Disk Time` for drive
 activity.** Both look right and both are wrong on Windows. See the slots section.

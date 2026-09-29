@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """Play images or GIFs on the CrystalX CoreView case LCD, from Windows.
 
-Windows port of lcd.py. The panel protocol is byte-for-byte identical; only
-the transport differs.
-
-On Linux we detach the cdc_acm kernel driver and write to USB bulk endpoint
-0x02 ourselves. On Windows that same endpoint is already exposed as a COM
-port by the in-box usbser.sys driver -- the device is a plain CDC-ACM
-composite, and interface 1's bulk OUT endpoint *is* the serial data endpoint.
-The vendor's own LCD Control.exe drives the panel this way (it holds the COM
-port open and no libusb driver is installed anywhere), so we do the same:
-open the port, write header + JPEG.
+The panel is a plain CDC-ACM composite device, so Windows' in-box usbser.sys
+driver exposes it as a COM port: interface 1's bulk OUT endpoint (0x02) *is*
+the serial data endpoint. The vendor's own LCD Control.exe drives the panel
+this way (it holds the COM port open and no libusb driver is installed
+anywhere), so we do the same: open the port, write header + JPEG.
 
 That means no libusb, no Zadig, no driver replacement and no admin rights.
 The only rule is that nothing else may hold the port, so close LCD Control.exe
 before running this.
 
-Every hardware quirk in README.md still applies -- the 180 degree rotation,
-the ~500k pixel ceiling, and the fact that the panel never scales an image up.
-Those are properties of the panel, not of the operating system.
+Every hardware quirk in README.md applies -- the 180 degree rotation, the
+~472k pixel ceiling, and the fact that the panel never scales an image up.
 
 Usage:
     lcd_win.py <source> [--width 320] [--fps 10] [--quality 88]
@@ -68,9 +62,7 @@ def find_port(explicit=None):
 class Panel:
     """The LCD, driven through its CDC serial port.
 
-    Far simpler than the Linux side: there is no kernel driver to detach and
-    none to re-attach, so none of lcd.py's cleanup hazards exist here. Closing
-    the port is the whole of it.
+    Closing the port is the only cleanup it needs.
     """
 
     def __init__(self, port=None):
@@ -104,12 +96,11 @@ class Panel:
 def load_frames(source, width):
     """Composite every frame of the source and scale it to `width`.
 
-    Pillow stands in for ImageMagick's -coalesce here: seeking a GIF frame and
-    converting it composites that frame over the ones before it, which is what
-    -coalesce does. Doing it in-process also means Windows needs no ImageMagick
-    install at all.
+    Seeking a GIF frame and converting it composites that frame over the ones
+    before it, so every frame comes out complete even when the GIF only stores
+    the pixels that changed.
 
-    Height follows the source aspect ratio, matching `-resize "{width}x"`.
+    Height follows the source aspect ratio.
     """
     try:
         img = Image.open(source)
@@ -130,7 +121,7 @@ def encode(frame, quality):
     """Rotate 180 degrees, then encode as JPEG.
 
     The panel is mounted upside down in the case and does not rotate for you.
-    subsampling=0 matches the Linux path's `-sampling-factor 1x1`.
+    subsampling=0 keeps full colour resolution (no chroma subsampling).
     """
     buf = BytesIO()
     frame.transpose(Image.ROTATE_180).save(
