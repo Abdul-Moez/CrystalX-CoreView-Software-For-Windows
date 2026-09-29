@@ -1,8 +1,8 @@
 # CrystalX CoreView LCD for Windows
 
-Show an animated GIF with a clock, the date and live PC stats (CPU, GPU, RAM,
-drives, network) on the LCD screen of a **CrystalX CoreView V-950** PC case —
-without the vendor's LCD Control app.
+Show an animated GIF with a clock, the date and live PC stats (CPU and GPU
+usage and temperature, RAM, drives, network) on the LCD screen of a
+**CrystalX CoreView V-950** PC case — without the vendor's LCD Control app.
 
 This is an unofficial project. It is not made by or affiliated with CrystalX or
 the makers of LCD Control.
@@ -11,6 +11,7 @@ the makers of LCD Control.
 - [Setup, step by step](#setup-step-by-step)
 - [Everyday use](#everyday-use)
 - [Start automatically with Windows](#start-automatically-with-windows-optional)
+- [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional)
 - [Change what the screen shows](#change-what-the-screen-shows-optional)
 - [If something goes wrong](#if-something-goes-wrong)
 - [Want to know how it works?](#want-to-know-how-it-works)
@@ -26,10 +27,9 @@ the makers of LCD Control.
 - **Python 3.10 or newer.** Step 1 below shows how to install it. Tested with
   Python 3.13.
 - **An internet connection**, only during setup.
-
-> **Coming soon — CPU and GPU temperatures.** When temperature readings are
-> added, they will also need the free **PawnIO 2.2.0** driver, installed once
-> from **https://pawnio.eu/**. You don't need it yet.
+- **For the CPU temperature only: PawnIO 2.2.0**, a free driver, installed once
+  from **https://pawnio.eu/** — see [Step 4](#step-4--install-pawnio-for-cpu-temperature).
+  Everything else works without it.
 
 ---
 
@@ -67,19 +67,38 @@ says **"Setup complete"**, press any key to close it.
 If Windows asks whether you want to run the file, choose **Run** (or
 **More info → Run anyway**). It only runs the setup described here.
 
-### Step 4 — Close the vendor's LCD Control app
+### Step 4 — Install PawnIO (for CPU temperature)
+
+Skip this if you don't need the CPU temperature — it will just show `--`.
+
+Windows only lets drivers read the CPU's temperature sensor, so this uses
+**PawnIO**, a small free driver signed by Microsoft (the same one
+LibreHardwareMonitor uses).
+
+1. Go to **https://pawnio.eu/** and download the installer (version 2.2.0 was
+   tested).
+2. Run it and click through. Windows asks for administrator permission — click
+   **Yes**.
+
+### Step 5 — Close the vendor's LCD Control app
 
 Only one program can drive the screen at a time.
 
 1. If **LCD Control** is running, close it. If you can't find its window, look
    for its icon in the system tray (bottom-right, near the clock), or end
    **LCD Control** in Task Manager.
-2. If it starts with Windows, turn off its auto-start setting so it doesn't
-   take the screen back after a restart.
+2. LCD Control usually starts itself at every login and takes the screen back.
+   See [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional)
+   to turn that off.
 
-### Step 5 — Start it
+### Step 6 — Start it
 
 Double-click **`run-clock.cmd`**.
+
+Windows asks **"Do you want to allow this app to make changes to your
+device?"** — click **Yes**. Reading the CPU temperature needs administrator
+rights, just like LCD Control. If you click **No**, it runs anyway and the CPU
+temperature shows `--`.
 
 Within a few seconds the case screen shows the GIF with the clock, date and
 stats. **Keep the black window open** — you can minimise it. Closing it stops
@@ -106,42 +125,89 @@ if nothing does. Autostart (below) makes the clock take over at login.
 
 ## Start automatically with Windows (optional)
 
-This starts the clock every time you log in, with no black window.
+This starts the clock every time you log in — hidden, with the temperatures,
+and **without the admin prompt**. It's the same trick LCD Control uses to start
+itself.
 
-1. Open the project folder in File Explorer.
-2. Click the address bar at the top, type `cmd` and press Enter. A black window
-   opens, already in the project folder.
-3. Paste this and press Enter:
+**To turn it on:** double-click **`autostart-on.cmd`** and click **Yes** on the
+Windows prompt (setting it up needs administrator rights once). It takes
+effect from your next login.
+
+If LCD Control is also set to start at login, it asks whether to turn that off
+— press **Y**, or the two will fight over the screen. LCD Control still works
+if you open it yourself later.
+
+**To turn it off:** double-click **`autostart-off.cmd`** and click **Yes**. It
+also stops the hidden clock straight away.
+
+- If you move the project folder, run `autostart-on.cmd` again from the new
+  place.
+- To stop the hidden clock just for now, end **pythonw.exe** in Task Manager
+  (Details tab). It comes back at your next login.
+- While the hidden clock runs, `run-clock.cmd` can't start — the screen is
+  already in use.
+
+---
+
+## Stop LCD Control starting with Windows (optional)
+
+LCD Control starts itself at every login through a Windows scheduled task
+called **`LCD ControlPowerBoot`**. That's why it doesn't show up in Task
+Manager's Startup tab, and its own autostart switch doesn't always remove it.
+While it runs, it holds the screen and this project can't use it.
+
+**What the command below does:**
+
+- It **only switches off that login task**. Nothing is deleted or uninstalled.
+- It **doesn't close LCD Control** if it's open right now, and doesn't touch
+  anything else you're working on.
+- LCD Control **still works whenever you open it yourself**.
+- It takes effect from your **next login**.
+
+**To turn it off:**
+
+1. Click **Start**, type `cmd`, right-click **Command Prompt** and choose
+   **Run as administrator**. Click **Yes** on the Windows prompt.
+2. Paste this and press Enter:
 
    ```cmd
-   schtasks /create /tn "CrystalX LCD" /sc onlogon /rl limited /f /tr "\"%cd%\venv-win\Scripts\pythonw.exe\" \"%cd%\clock_win.py\" \"%cd%\retro_pixel_guy_smoking_on_rooftop.gif\""
+   schtasks /change /tn "LCD ControlPowerBoot" /disable
    ```
 
-   It should say `SUCCESS`. No administrator rights are needed.
+   It should say `SUCCESS`. If it says **"The system cannot find the file
+   specified"**, the task doesn't exist — LCD Control isn't set to start at
+   login, and there's nothing to do.
 
-It takes effect from your next login. To stop the hidden clock without logging
-out, end **pythonw.exe** in Task Manager (Details tab).
-
-To remove autostart, paste this the same way:
+**To check it**, paste this in the same window:
 
 ```cmd
-schtasks /delete /tn "CrystalX LCD" /f
+schtasks /query /tn "LCD ControlPowerBoot"
 ```
 
-- If you get **"cannot be more than 261 character(s)"**, the folder path is too
-  long. Move the folder somewhere shorter, such as `C:\crystalx-lcd`, and run
-  the command again.
-- If you move the folder later, run the create command again from the new
-  place.
-- Make sure LCD Control doesn't also start with Windows, or the two will fight
-  over the screen.
+The **Status** column says `Disabled` when it's off, and `Ready` when LCD
+Control will start at login.
+
+**To undo it** and let LCD Control start at login again, paste this in an
+administrator Command Prompt:
+
+```cmd
+schtasks /change /tn "LCD ControlPowerBoot" /enable
+```
+
+If that says "The system cannot find the file specified", the task has been
+removed (LCD Control's own switch does that). Turn on the autostart option
+inside LCD Control instead, and it creates the task again.
+
+`autostart-on.cmd` also offers to switch this task off for you when you set
+up this project's autostart.
 
 ---
 
 ## Change what the screen shows (optional)
 
-The bottom box shows five readings by default: CPU usage, GPU usage, RAM usage,
-drive activity and network speed. You can pick others.
+The bottom box shows seven readings by default: CPU usage and temperature, GPU
+usage and temperature, RAM usage, drive activity and network speed. You can
+pick others.
 
 1. Right-click **`run-clock.cmd`** and choose **Edit** (it opens in Notepad).
 2. Find the line starting with `venv-win\Scripts\python.exe clock_win.py`.
@@ -161,8 +227,10 @@ drive activity and network speed. You can pick others.
 | Name | Shows |
 |---|---|
 | `cpu` | CPU usage in % |
+| `cputemp` | CPU temperature (needs PawnIO and the admin prompt answered Yes) |
 | `clock` | Current CPU speed, including boost |
 | `gpu` | GPU usage in % |
+| `gputemp` | GPU temperature |
 | `vram` | Video memory in use |
 | `ram` | RAM in use, in GB |
 | `ram%` | RAM in use, in % |
@@ -212,9 +280,23 @@ sending it. Start `run-clock.cmd` again and read any message in its window.
 The picture being sent is too big — this happens if you changed `--width` or
 used another GIF. Go back to the default settings.
 
+**CPU Temp shows `--`**
+The first line in the black window says why. Usually one of these:
+- **"needs administrator rights"** — you clicked No on the Windows prompt.
+  Close the window and start `run-clock.cmd` again.
+- **"needs the PawnIO driver"** — do [Step 4](#step-4--install-pawnio-for-cpu-temperature).
+
+**"temperatures unavailable: … run setup.cmd again"**
+The temperature parts aren't installed or are blocked by Windows — common
+after downloading a new version. Double-click `setup.cmd` again.
+
 **A reading shows `--`**
 That reading isn't available on your PC (for example, no GPU counters), or it's
 the first two seconds after starting — speed readings need two samples.
+
+**Autostart is on but nothing shows after login**
+Something else took the screen first — usually LCD Control starting itself.
+See [Stop LCD Control starting with Windows](#stop-lcd-control-starting-with-windows-optional).
 
 **Nothing on the screen and no error**
 Try `run-gif.cmd`. If the plain GIF works, the problem is in the clock and

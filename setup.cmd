@@ -35,8 +35,16 @@ echo Installing libraries from requirements.txt ...
 "venv-win\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto failed
 
+REM Files extracted from a downloaded ZIP carry Windows' "from the internet"
+REM mark, and .NET refuses to load DLLs that have it. Clear it on the bundled
+REM LibreHardwareMonitor DLLs so the temperature readings can load.
+echo Unblocking the bundled temperature libraries ...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath 'lib' -Recurse -File | Unblock-File"
+if errorlevel 1 goto failed
+
 echo.
 echo Setup complete.
+echo For CPU temperature, also install PawnIO from https://pawnio.eu/
 echo Close LCD Control if it is running, then double-click run-clock.cmd.
 echo.
 pause

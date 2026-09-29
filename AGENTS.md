@@ -26,6 +26,13 @@ too.
   rooftop GIF, and don't re-run the width experiment — it has been done.
 - The vendor app (LCD Control) is obfuscated; its code and strings cannot be
   read statically. Don't spend time trying.
+- **Temperatures** come from LibreHardwareMonitor via `temps_win.py`. CPU needs
+  PawnIO **running** and admin rights; GPU (AMD) needs neither. An unreadable
+  sensor reports 0, not None. Never switch to a WinRing0-based build. See
+  "Temperatures" in `docs/HOW-IT-WORKS.md` before debugging a `--`.
+- The DLLs in `lib/LibreHardwareMonitor/` are unmodified release files. When
+  upgrading them, update the versions and SHA-256 list in its
+  `THIRD-PARTY-NOTICES.md`, and keep each component's license file.
 
 ## Testing
 
@@ -34,6 +41,9 @@ too.
   ask — do not assume it worked because the process ran without error.
 - **Ask the user before sending anything to the panel.** The vendor app must be
   closed first, and they need to be watching the screen.
+- **Ask before anything that shows a Windows admin (UAC) prompt** —
+  `run-clock.cmd`, `autostart-on.cmd`, `autostart-off.cmd`, or elevating a
+  test. The user has to click Yes.
 - Use `--preview FILE` for anything visual. It renders a frame to PNG without
   opening the port, so it neither disturbs a running panel nor risks the
   display. Look at the PNG before sending anything to hardware.
@@ -69,9 +79,11 @@ too.
 - Python libraries are pinned to exact versions in `requirements.txt`;
   `setup.cmd` installs them into `venv-win/`. Add new libraries there with an
   exact version. Never commit `venv-win/`.
-- **PawnIO** (needed for the planned temperature readings) is a kernel driver.
-  It is **not** bundled in the repo; the README names the version and links to
+- **PawnIO** (needed for the CPU temperature) is a kernel driver. It is **not**
+  bundled in the repo; the README names the version and links to
   https://pawnio.eu/. Keep it that way.
+- `setup.cmd` must keep unblocking `lib\` (`Unblock-File`): .NET refuses DLLs
+  that carry the "downloaded from the internet" mark.
 - `README.md` is for people who just want the screen running and may not know
   GitHub. Keep it step by step and free of internals. Technical detail goes in
   `docs/HOW-IT-WORKS.md`; rules for agents go here.

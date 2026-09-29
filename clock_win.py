@@ -247,19 +247,24 @@ SLOTS = {
     "disk":     ("Disk Free",    "999G",    lambda m, r: m.disk_free()),
     "procs":    ("Processes",    "9999",    lambda m, r: str(len(psutil.pids()))),
     "uptime":   ("Uptime",       "99h 59m", lambda m, r: m.uptime()),
+    "cputemp":  ("CPU Temp",     "100°C",   lambda m, r: m.temp("cpu")),
+    "gputemp":  ("GPU Temp",     "100°C",   lambda m, r: m.temp("gpu")),
 }
+# Only these need LibreHardwareMonitor, so it is loaded only when one is shown.
+TEMP_SLOTS = ("cputemp", "gputemp")
 # Slots fill the grid two per row; an odd one at the end is centred across the
-# full width, which is why this default has five.
-DEFAULT_SLOTS = "cpu,gpu,ram%,disk%,net"
+# full width, which is why this default has seven. Each usage sits beside its
+# temperature.
+DEFAULT_SLOTS = "cpu,cputemp,gpu,gputemp,ram%,disk%,net"
 
 
 class Metrics:
-    """The readings Windows gives up without extra software or elevation.
+    """Every reading on the panel.
 
-    Temperatures are deliberately absent. Windows exposes them only from
-    kernel mode, so showing CPU or GPU temperature means running something
-    like LibreHardwareMonitor and its kernel driver. Adding one later is a new
-    entry in SLOTS and nothing else.
+    All but the temperatures come from psutil and Windows performance
+    counters, which need no driver and no elevation. Temperatures come from
+    temps_win (LibreHardwareMonitor), loaded only when a temperature slot is
+    shown.
 
     Values refresh on an interval rather than per frame: CPU load is a delta
     between samples, so a short window reads as noise, and every changed value
@@ -287,6 +292,10 @@ class Metrics:
         self._slow = {}
         self._cache = None
         self._next = 0.0
+        self.temps = None
+        if any(s in TEMP_SLOTS for s in slots):
+            from temps_win import Temperatures
+            self.temps = Temperatures()
 
     def _cached(self, key, seconds, fn):
         """Memoise a reading that changes slowly or costs real disk I/O."""
@@ -299,6 +308,11 @@ class Metrics:
     @staticmethod
     def scaled(value, unit, suffix):
         return f"{value / unit:.1f}{suffix}" if value is not None else "--"
+
+    def temp(self, which):
+        """CPU or GPU temperature in whole degrees: "47°C"."""
+        v = self.temps.read(which) if self.temps else None
+        return f"{v:.0f}°C" if v is not None else "--"
 
     def cpu_clock(self):
         """Live core clock, including boost, in GHz."""
@@ -540,6 +554,9 @@ def main():
                          args.date_size or avail)
 
     stats = None if args.no_stats else Metrics(slots)
+    if stats and stats.temps:
+        atexit.register(stats.temps.close)
+        print(stats.temps.status(), flush=True)
     # Each column gets half the width, less a gap so they never collide, but a
     # centred odd slot gets the lot. The two groups are therefore sized
     # against different limits and whichever comes out smaller wins. Sizing

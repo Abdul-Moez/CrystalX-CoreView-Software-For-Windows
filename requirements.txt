@@ -3,3 +3,10 @@ pillow==12.3.0
 pyserial==3.5
 psutil==7.2.2
 pywin32==312
+
+# Temperatures: pythonnet loads LibreHardwareMonitor (lib/LibreHardwareMonitor).
+# The last three are what pythonnet itself needs, pinned too.
+pythonnet==3.1.0
+clr_loader==0.3.1
+cffi==2.1.1
+pycparser==3.0

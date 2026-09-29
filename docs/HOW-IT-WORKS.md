@@ -18,7 +18,8 @@ quirks. They are written down so nobody has to rediscover them.
 - [Files](#files)
 - [Command-line options](#command-line-options)
 - [Stats slots](#stats-slots)
-- [Temperatures (planned)](#temperatures-planned)
+- [Temperatures](#temperatures)
+- [Admin rights and autostart](#admin-rights-and-autostart)
 - [Performance](#performance)
 - [Approaches that did not work](#approaches-that-did-not-work)
 
@@ -252,10 +253,16 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
   string beginning with `VMAX`; the app uses it to keep per-panel settings.
 - **It bundles an old LibreHardwareMonitor** (0.9.3) for its own sensor
   readouts. That version predates the switch to the PawnIO driver and uses
-  WinRing0 instead (see [Temperatures](#temperatures-planned)).
-- **Its settings** live in
-  `%APPDATA%\Hailian Zhixin (Shenzhen) Technology Co., Ltd\LCD Control\Config.json`,
-  including whether it starts with Windows (`AutoStar`).
+  WinRing0 instead (see [Temperatures](#temperatures)).
+- **It always runs as administrator.** Its manifest says
+  `requireAdministrator`, so starting it by hand shows the admin prompt.
+- **It starts itself at login through a scheduled task**, `LCD ControlPowerBoot`
+  (logon trigger, "run with highest privileges"). A task like that runs as
+  admin with no prompt, which is why it can show temperatures at startup
+  without asking. The `AutoStar` value in its settings file
+  (`%APPDATA%\Hailian Zhixin (Shenzhen) Technology Co., Ltd\LCD Control\Config.json`)
+  said `false` on the test machine while the task was active and running, so
+  don't trust that file; check Task Scheduler.
 
 ---
 
@@ -271,8 +278,11 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 | `setup.cmd` | One-time setup: creates `venv-win` and installs `requirements.txt` into it |
 | `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, which `clock_win.py` imports. **The core driver — treat with care.** |
 | `clock_win.py` | Overlay player: GIF + clock + date + configurable stats |
-| `run-clock.cmd` | Runs `clock_win.py` with the known-good settings |
-| `run-gif.cmd` | Runs `lcd_win.py` — plain GIF, no overlay. **Known-good fallback.** |
+| `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
+| `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
+| `run-clock.cmd` | Runs `clock_win.py` with the known-good settings, asking for admin rights first |
+| `run-gif.cmd` | Runs `lcd_win.py` — plain GIF, no overlay, no admin. **Known-good fallback.** |
+| `autostart-on.cmd`, `autostart-off.cmd` | Create or remove the login task that runs the clock hidden, as admin, without a prompt |
 | `retro_pixel_guy_smoking_on_rooftop.gif` | The wallpaper GIF |
 | `venv-win/` | Python environment created by `setup.cmd`. Not in git. |
 
@@ -354,14 +364,17 @@ Images and GIFs only. Video would need ffmpeg.
 `--slots` takes a comma-separated list, filling the grid **two per row**. An odd
 one at the end is **centred across the full width**.
 
-Default: `cpu,gpu,ram%,disk%,net`
+Default: `cpu,cputemp,gpu,gputemp,ram%,disk%,net`
 
 ```
-CPU Usage      GPU Usage
-     6%             1%
+CPU Usage       CPU Temp
+4%                  47°C
+
+GPU Usage       GPU Temp
+8%                  51°C
 
 RAM Usage    Drive Usage
-    49%            29%
+53%                   0%
 
       Net D/U MB/s
         0.0/0.1
@@ -370,7 +383,9 @@ RAM Usage    Drive Usage
 | Slot | Label | Example | Notes |
 |---|---|---|---|
 | `cpu` | CPU Usage | `6%` | |
+| `cputemp` | CPU Temp | `47°C` | needs PawnIO and admin rights — see [Temperatures](#temperatures) |
 | `gpu` | GPU Usage | `1%` | busiest GPU engine type, as Task Manager reports it |
+| `gputemp` | GPU Temp | `51°C` | see [Temperatures](#temperatures) |
 | `ram` | RAM | `7.5G` | |
 | `ram%` | RAM Usage | `49%` | |
 | `vram` | GPU VRAM | `0.9G` | dedicated video memory in use |
@@ -449,28 +464,86 @@ counter, scaled against the base clock — that one tracks boost, reading
 
 ---
 
-## Temperatures (planned)
+## Temperatures
 
-Not shown yet. Windows gives CPU and GPU temperatures **only to kernel-mode
-code** — there is no normal API a program can call, which is why every
-temperature tool installs a driver.
+Windows gives CPU temperatures **only to kernel-mode code** — there is no
+performance counter or normal API for them, which is why every temperature
+tool needs a driver.
 
-The plan:
+### How they are read
 
 - **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)**
-  (MPL-2.0), loaded as a library from Python, reads the sensors.
-- It reaches the hardware through the **[PawnIO](https://pawnio.eu/)** driver
-  (2.2.0, signed by Microsoft). PawnIO replaced the old WinRing0 driver in
-  LibreHardwareMonitor 0.9.5 because WinRing0 has a known vulnerability,
-  [CVE-2020-14979](https://nvd.nist.gov/vuln/detail/CVE-2020-14979), and
-  antivirus software flags it. Without PawnIO, LibreHardwareMonitor cannot read
-  any CPU values.
-- PawnIO is a kernel driver, so it has to be installed into Windows once, with
-  administrator rights. It is **not** bundled in this repo; the README links to
-  it. Reading temperatures will also need the script to run as administrator.
+  0.9.6 (MPL-2.0) reads the sensors. `temps_win.py` loads its DLLs from
+  `lib/LibreHardwareMonitor/` through **pythonnet**, on the .NET Framework 4.8
+  that ships with Windows 10 and 11. It is loaded only when a temperature slot
+  is shown, so it costs nothing otherwise.
+- **CPU:** LibreHardwareMonitor reaches the sensor through the
+  **[PawnIO](https://pawnio.eu/)** driver (2.2.0, signed by Microsoft), and
+  only with administrator rights. On a Ryzen the sensor used is
+  `Core (Tctl/Tdie)`, the figure AMD's own tools show; on Intel it is
+  `CPU Package`. See `CPU_SENSORS` for the fallbacks.
+- **GPU:** `GPU Core`. On AMD cards this needs neither PawnIO nor admin rights,
+  so the GPU temperature still shows when the admin prompt is refused. A
+  discrete card is preferred over an integrated one.
+- An unreadable sensor reports **0**, not nothing, so 0 and below are shown as
+  `--`. The first line the clock prints says which sensors it found, or why
+  one is missing.
 
-Adding it is a new method in `Metrics` and new entries in `SLOTS`. Nothing else
-changes.
+### PawnIO gotchas
+
+PawnIO replaced the old WinRing0 driver in LibreHardwareMonitor 0.9.5.
+WinRing0 has a known vulnerability,
+[CVE-2020-14979](https://nvd.nist.gov/vuln/detail/CVE-2020-14979), and
+antivirus software flags it. Without PawnIO, LibreHardwareMonitor cannot read
+any CPU values. PawnIO is **not** bundled in this repo; the README links to it.
+
+Two things were found on the test machine:
+
+- **LibreHardwareMonitor only talks to PawnIO while its driver is running**,
+  and never starts it. Even the official installer registers the driver as a
+  *manual-start* service, so after a reboot it can be stopped.
+  `ensure_pawnio()` starts it when the clock runs as admin.
+- **LibreHardwareMonitor checks PawnIO's install entry** (`DisplayVersion` under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO`). A copy
+  installed silently by another program (here, probably FurMark) had the
+  driver but no install entry, and the CPU read 0 even as admin. Running the
+  official installer fixed it.
+
+### Files downloaded in a ZIP are blocked
+
+Windows marks every file extracted from a downloaded ZIP as "from the
+internet", and the .NET Framework refuses to load DLLs carrying that mark
+(`An attempt was made to load an assembly from a network location…`).
+`setup.cmd` clears the mark on `lib\` with `Unblock-File`. If temperatures say
+"Windows is blocking the DLLs", run `setup.cmd` again.
+
+---
+
+## Admin rights and autostart
+
+Reading the CPU temperature needs administrator rights. The project handles
+this the same way LCD Control does:
+
+| Started… | How | Prompt? |
+|---|---|---|
+| By hand | `run-clock.cmd` re-launches itself elevated with `Start-Process -Verb RunAs`. Answering No carries on unelevated; CPU temperature shows `--`. | Yes, each time |
+| At login | `autostart-on.cmd` registers the task `CrystalX LCD`: logon trigger, current user, **run with highest privileges**, `pythonw.exe` (no console), working directory = project folder. | No |
+
+A task with highest privileges runs elevated without asking because an
+administrator approved it once, when it was created — that is the admin prompt
+`autostart-on.cmd` shows.
+
+Two details that matter:
+
+- **Scheduled tasks stop after 3 days by default.** The task is created with
+  no execution time limit (`PT0S`); without that, a PC left on for days would
+  lose the clock. The same task also allows running on battery.
+- **The task is built with PowerShell's `Register-ScheduledTask`, not
+  `schtasks /create`**, which caps the command at 261 characters and so failed
+  for long folder paths.
+
+`autostart-on.cmd` also offers to disable LCD Control's own login task
+(`LCD ControlPowerBoot`), since only one program can hold the COM port.
 
 ---
 
@@ -523,6 +596,14 @@ the bytes reached the device and the fault is elsewhere.
 
 **Reading the vendor app's code to learn its commands.** It is obfuscated; see
 [What the vendor app revealed](#what-the-vendor-app-revealed).
+
+**Assuming "PawnIO is installed" means CPU temperatures will work.** The driver
+must also be running and registered the official way; see
+[PawnIO gotchas](#pawnio-gotchas). Running as admin alone does not help.
+
+**`schtasks /create` for autostart.** Its default 3-day time limit stops the
+clock on a PC left running, and its 261-character command limit breaks long
+folder paths. See [Admin rights and autostart](#admin-rights-and-autostart).
 
 **Using `psutil.cpu_freq()` for a live clock, or `% Disk Time` for drive
 activity.** Both look right and both are wrong on Windows. See
