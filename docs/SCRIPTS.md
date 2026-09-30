@@ -148,8 +148,8 @@ also stops the hidden clock straight away.
 ## Change what the screen shows (optional)
 
 The bottom box shows seven readings by default: CPU usage and temperature, GPU
-usage and temperature, RAM usage, drive activity and network speed. You can
-pick others.
+usage and temperature, RAM usage, disk usage (how busy the drives are) and
+network speed. You can pick others.
 
 1. Right-click **`run-clock.cmd`** and choose **Edit** (it opens in Notepad).
 2. Find the line starting with `venv-win\Scripts\python.exe clock_win.py`.
@@ -161,7 +161,7 @@ pick others.
    ```
 
    Inside this file, write a percent sign twice: `ram%%` for RAM usage in
-   percent, `disk%%` for drive activity.
+   percent, `disk%%` for disk usage.
 
 4. Save, close the black window if it's running, and double-click
    `run-clock.cmd` again.
@@ -186,12 +186,17 @@ pick others.
 | `uptime` | Time since Windows started |
 
 Readings update every 2 seconds. They fill the box two per row, and an odd one
-at the end is centred.
+at the end is centred. A `-` leaves a spot empty (its partner moves to the
+middle), and `--columns 1` puts one reading on each row, with bigger numbers.
 
 **Using your own picture:** add `--fit fill` (crop to cover the screen),
 `--fit blur` (whole picture, blurred edges) or `--fit color --fit-color #203040`
 (whole picture, solid edges) and put your file name in place of the rooftop
-GIF. For fonts, sizes and frame rate, see
+GIF. `--zoom 2 --pan-x 0` zooms in and shows the left side.
+
+Everything the app's window can change works here too — 24-hour time
+(`--time-format 24h`), seconds, the date format (`--date-format "YYYY-MM-DD"`),
+sizes, colours, positions, renamed stats, fonts. See
 [Command-line options](HOW-IT-WORKS.md#command-line-options).
 
 ---

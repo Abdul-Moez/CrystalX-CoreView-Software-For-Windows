@@ -44,7 +44,7 @@ import win32pipe
 # The one place the version lives. The installer, the programs' file
 # properties and the About box all read it; the release build checks that
 # the git tag (v1.0.0) matches.
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 SERVICE_NAME = "CrystalXLCD"
 DISPLAY_NAME = "CrystalX LCD"
@@ -69,42 +69,6 @@ _ERROR_MORE_DATA = 234
 
 
 DEFAULT_PICTURE = "retro_pixel_guy_smoking_on_rooftop.gif"
-DEFAULT_CONFIG = {"picture": None, "picture_label": None,
-                  "fit": "fill", "fit_color": "#000000"}
-FIT_MODES = ("fill", "blur", "color")       # the same as lcd_win.FIT_MODES
-
-
-def load_config():
-    """The saved settings, with anything missing or invalid replaced by defaults.
-
-    The service writes the file; the tray reads it too, so the window shows
-    the current settings even while the display is stopped.
-    """
-    config = dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            saved = json.load(f)
-    except (OSError, ValueError):
-        return config
-    if saved.get("fit") in FIT_MODES:
-        config["fit"] = saved["fit"]
-    color = saved.get("fit_color")
-    if isinstance(color, str) and len(color) == 7 and color.startswith("#"):
-        try:
-            int(color[1:], 16)
-            config["fit_color"] = color
-        except ValueError:
-            pass
-    picture = saved.get("picture")
-    # Only a picture the service itself stored in DATA_DIR is ever used.
-    if (isinstance(picture, str) and os.path.basename(picture) == picture
-            and os.path.isfile(os.path.join(DATA_DIR, picture))):
-        config["picture"] = picture
-        # The name of the file the user picked, for display only.
-        label = saved.get("picture_label")
-        if isinstance(label, str):
-            config["picture_label"] = label[:100]
-    return config
 
 
 def app_dir():

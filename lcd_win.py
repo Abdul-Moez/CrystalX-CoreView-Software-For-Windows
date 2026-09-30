@@ -66,6 +66,8 @@ MAX_PIXELS = 500_000
 # mode go on a canvas of this shape, so any picture ends up within the limit.
 FIT_SIZE = (320, 1476)
 FIT_MODES = ("fill", "blur", "color")
+# How far a fitted picture can be enlarged beyond its fill or fit size.
+MAX_ZOOM = 4.0
 
 # CDC ACM ignores the line rate -- there is no real UART behind it -- but
 # Windows still wants a valid value.
@@ -122,20 +124,51 @@ class Panel:
             pass
 
 
-def fit_frame(frame, size, mode, color=(0, 0, 0)):
-    """Place one RGB frame on a canvas of `size`.
+def fit_size(width):
+    """The canvas a fitted picture goes on: FIT_SIZE's shape at `width`."""
+    return width, round(width * FIT_SIZE[1] / FIT_SIZE[0])
+
+
+def fit_geometry(src_size, size, mode, zoom=1.0, pan=(0.5, 0.5)):
+    """Where a picture of `src_size` lands on a canvas of `size`.
+
+    Returns (scale, x, y, width, height): the picture is scaled by `scale` to
+    width x height, with its top-left corner at (x, y) -- negative when it
+    overflows the canvas on that side.
+
+    fill scales it to cover the canvas, blur and color to fit inside it, and
+    `zoom` (1 to MAX_ZOOM) enlarges it from there. `pan` places it on each
+    axis: 0 lines its left (top) edge up with the canvas's, 1 its right
+    (bottom) edge, and 0.5 centres it -- whichever of the two is larger.
+    """
+    w, h = size
+    sw, sh = src_size
+    base = max(w / sw, h / sh) if mode == "fill" else min(w / sw, h / sh)
+    scale = base * zoom
+    width, height = sw * scale, sh * scale
+    return scale, (w - width) * pan[0], (h - height) * pan[1], width, height
+
+
+def fit_frame(frame, size, mode, color=(0, 0, 0), zoom=1.0, pan=(0.5, 0.5)):
+    """Place one RGB frame on a canvas of `size` (see fit_geometry).
 
     fill  -- scale to cover the whole canvas, cropping what overflows
     blur  -- the whole picture visible, gaps filled with a blurred copy of it
     color -- the whole picture visible, gaps filled with `color`
     """
     w, h = size
-    if mode == "fill":
-        scale = max(w / frame.width, h / frame.height)
-        big = frame.resize((max(w, round(frame.width * scale)),
-                            max(h, round(frame.height * scale))), Image.LANCZOS)
-        x, y = (big.width - w) // 2, (big.height - h) // 2
-        return big.crop((x, y, x + w, y + h))
+    scale, x, y, width, height = fit_geometry(frame.size, size, mode, zoom, pan)
+    # Only the part of the picture that lands on the canvas is resampled, so
+    # zooming in on a large photo costs no more than showing it whole.
+    x0, y0 = max(0, round(x)), max(0, round(y))
+    x1, y1 = min(w, round(x + width)), min(h, round(y + height))
+    x1, y1 = max(x1, x0 + 1), max(y1, y0 + 1)
+    box = (max(0.0, (x0 - x) / scale), max(0.0, (y0 - y) / scale),
+           min(float(frame.width), (x1 - x) / scale),
+           min(float(frame.height), (y1 - y) / scale))
+    part = frame.resize((x1 - x0, y1 - y0), Image.LANCZOS, box=box)
+    if part.size == size:
+        return part
     if mode == "blur":
         # Blurring a small copy and scaling it back up is far cheaper than a
         # large-radius blur at full size, and looks the same.
@@ -144,14 +177,12 @@ def fit_frame(frame, size, mode, color=(0, 0, 0)):
         back = Image.blend(back, Image.new("RGB", size, (0, 0, 0)), 0.35)
     else:
         back = Image.new("RGB", size, color)
-    scale = min(w / frame.width, h / frame.height)
-    small = frame.resize((max(1, round(frame.width * scale)),
-                          max(1, round(frame.height * scale))), Image.LANCZOS)
-    back.paste(small, ((w - small.width) // 2, (h - small.height) // 2))
+    back.paste(part, (x0, y0))
     return back
 
 
-def load_frames(source, width, fit=None, color=(0, 0, 0)):
+def load_frames(source, width, fit=None, color=(0, 0, 0), zoom=1.0,
+                pan=(0.5, 0.5), limit=None, each=None):
     """Composite every frame of the source and scale it to `width`.
 
     Seeking a GIF frame and converting it composites that frame over the ones
@@ -160,22 +191,29 @@ def load_frames(source, width, fit=None, color=(0, 0, 0)):
 
     Without `fit`, height follows the source aspect ratio. With a fit mode
     (see fit_frame), every frame goes on a canvas of FIT_SIZE's shape instead,
-    so any picture -- wide, square or tall -- fills the frame the same way.
+    so any picture -- wide, square or tall -- fills the frame the same way,
+    enlarged by `zoom` and placed by `pan`.
+
+    `limit` stops after that many frames; a preview needs only the first.
+    `each` is applied to every frame as it is made, and its result kept
+    instead, so a long GIF never has to be held in full at panel size.
     """
     try:
         img = Image.open(source)
     except OSError as e:
         sys.exit(f"cannot read {source}: {e}\n"
                  "(images and GIFs only -- video would need ffmpeg)")
-    size = (width, round(width * FIT_SIZE[1] / FIT_SIZE[0])) if fit else None
+    size = fit_size(width) if fit else None
     frames = []
     for frame in ImageSequence.Iterator(img):
+        if limit and len(frames) >= limit:
+            break
         rgb = frame.convert("RGB")
         if size:
-            frames.append(fit_frame(rgb, size, fit, color))
+            rgb = fit_frame(rgb, size, fit, color, zoom, pan)
         else:
-            height = round(rgb.height * width / rgb.width)
-            frames.append(rgb.resize((width, height), Image.LANCZOS))
+            rgb = rgb.resize((width, round(rgb.height * width / rgb.width)), Image.LANCZOS)
+        frames.append(each(rgb) if each else rgb)
     if not frames:
         sys.exit(f"nothing rendered from {source}")
     return frames

@@ -50,13 +50,42 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
   users.
 - The engine is shared: the service runs `clock_win.main(argv, stop, log)`.
   Keep the command-line behaviour of the scripts unchanged when editing it.
+- **Settings go through `settings_win.py`.** A new setting needs all of: a
+  default in `DEFAULT_LOOK`, a check in `clean_look` (the service runs as
+  SYSTEM; nothing unchecked may reach it), a `clock_win` option, and a line in
+  `engine_argv`. The window's preview uses `clock_win.preview()` with the same
+  `engine_argv`, so it always matches the panel — never draw the preview any
+  other way.
 - The window: everything lives in one window; the tray menu has only **Show**
   and **Quit**. Closing the window hides it; Quit stops the service and exits.
+  One Apply / Undo covers every tab.
+- **Uninstall never deletes saved layouts without asking** (the user asked for
+  this). No is the default; a silent uninstall keeps them.
 - **Releases:** the version lives only in `VERSION` in `ipc_win.py`. Bump it,
   commit, then the user tags `vX.Y.Z` and pushes the tag; the workflow checks
   they match. Never change the installer's `AppId`. When updating PawnIO or
   Inno Setup, update the URL **and** SHA-256 in `release.yml` together.
 - **The user commits and pushes; don't.** Hand over a commit message instead.
+
+## Keep it light
+
+The service runs all day and the window app sits in the tray at every login;
+the user asked for both to be as light as possible. See "Performance" in
+`docs/HOW-IT-WORKS.md` for the measured numbers.
+
+- **The display loop does per frame only what must be per frame.** Frosting,
+  the 180° flip and packing happen once per frame at load (`prepare`); the text
+  is drawn once per change (`text_bands`), not once per frame. Don't move work
+  back into the loop.
+- Animated pictures are held zlib-packed and made one frame at a time
+  (`load_frames(..., each=...)`), so a 300-frame GIF never sits in memory at
+  full size. Keep it that way.
+- **Hidden, the window app does nothing but keep the tray tooltip current**: no
+  redraws, no settings or layout reads, no preview picture held. The font list
+  is read only when the Style tab is opened.
+- **Measure before and after** any change to the loop, with frames going to a
+  stand-in panel rather than the real one (see "Performance"), and compare
+  like with like: same picture, same settings, 60 s after it has settled.
 
 ## Testing
 
@@ -80,9 +109,13 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
 - `run-gif.cmd` is the known-good baseline. If something breaks, go back to it
   to establish whether the problem is the hardware or the change.
 - Put experiments and throwaway scripts outside the repo.
-- **In-process tests of the service must use their own pipe name and data
-  folder** (patch `PIPE_NAME`, `DATA_DIR`, `CONFIG_FILE`, `LOG_FILE` in both
-  `ipc_win` and `service_win`). When the app is installed, the real service
+- **In-process tests of the service or the window must use their own pipe
+  name and data folder** (patch `PIPE_NAME`, `DATA_DIR`, `CONFIG_FILE`,
+  `LOG_FILE` and `LAYOUTS_DIR` in `ipc_win`, `settings_win` and `service_win`
+  — each imported them by name). To test the window, replace
+  `tray_win.send_settings` with a call into `CrystalLcdService.handle` on a
+  stand-in object, and stub `service_state`, `start_service`, `stop_service`
+  and the tray icon, so nothing reaches the installed service. When the app is installed, the real service
   owns `\\.\pipe\CrystalXLCD`; a test copy cannot create it, so the test's
   requests silently reach the real service and change the user's settings.
   This happened once.

@@ -48,6 +48,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -61,13 +62,15 @@ import win32pipe
 import win32security
 import win32service
 import win32serviceutil
-from PIL import Image, ImageColor, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 
 import clock_win
-from ipc_win import (CONFIG_FILE, DATA_DIR, DEFAULT_PICTURE, DISPLAY_NAME,
-                     FIT_MODES, LOG_FILE, MAX_FRAMES, MAX_PICTURE_BYTES,
-                     PIPE_NAME, SERVICE_NAME, app_dir, load_config,
-                     read_message)
+from ipc_win import (CONFIG_FILE, DATA_DIR, DISPLAY_NAME, LOG_FILE, MAX_FRAMES,
+                     MAX_PICTURE_BYTES, PIPE_NAME, SERVICE_NAME, read_message)
+from settings_win import (LAYOUTS_DIR, MAX_LAYOUTS, clean_layout_name,
+                          clean_look, engine_argv, find_layout, layout_file,
+                          list_layouts, load_config, look_of, picture_path,
+                          read_layout)
 
 PICTURE_FORMATS = {"GIF": ".gif", "PNG": ".png", "JPEG": ".jpg",
                    "WEBP": ".webp", "BMP": ".bmp"}
@@ -119,22 +122,89 @@ def _protect(path):
         None, None, sd.GetSecurityDescriptorDacl(), None)
 
 
-def save_config(config):
-    tmp = CONFIG_FILE + ".tmp"
+def _write_json(path, data):
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 
-def picture_path(config):
-    if config["picture"]:
-        return os.path.join(DATA_DIR, config["picture"])
-    return os.path.join(app_dir(), DEFAULT_PICTURE)
+def save_config(config):
+    _write_json(CONFIG_FILE, config)
 
 
 def clock_argv(config):
-    return [picture_path(config), "--fit", config["fit"],
-            "--fit-color", config["fit_color"]]
+    return engine_argv(look_of(config), picture_path(config))
+
+
+def _remove_matching(folder, prefix, keep=None):
+    """Delete the files in `folder` named prefix.* -- old copies of a picture."""
+    for name in os.listdir(folder):
+        if name.startswith(prefix) and name != keep:
+            os.remove(os.path.join(folder, name))
+
+
+def store_picture(config, data, label):
+    """Keep the service's own copy of a picture the window sent."""
+    name = "picture" + check_picture(data)
+    _remove_matching(DATA_DIR, "picture.", keep=name)
+    with open(os.path.join(DATA_DIR, name), "wb") as f:
+        f.write(data)
+    config["picture"] = name
+    config["picture_label"] = os.path.basename(str(label or name))[:100]
+
+
+def save_layout(name):
+    """Save the current settings, picture included, as layout `name`.
+
+    A layout with the same name (in any case) is replaced.
+    """
+    name = clean_layout_name(name)
+    config = load_config()
+    number = find_layout(name)
+    if number is None:
+        used = {n for n, _ in list_layouts()}
+        free = [n for n in range(1, MAX_LAYOUTS + 1) if n not in used]
+        if not free:
+            raise ValueError(f"you can keep up to {MAX_LAYOUTS} layouts -- "
+                             "delete one first")
+        number = free[0]
+    os.makedirs(LAYOUTS_DIR, exist_ok=True)
+    _remove_matching(LAYOUTS_DIR, f"{number}.")
+    picture = None
+    if config["picture"]:
+        picture = f"{number}{os.path.splitext(config['picture'])[1]}"
+        shutil.copyfile(os.path.join(DATA_DIR, config["picture"]),
+                        os.path.join(LAYOUTS_DIR, picture))
+    _write_json(layout_file(number), {
+        "name": name, "picture": picture,
+        "picture_label": config["picture_label"] if picture else None,
+        "look": look_of(config)})
+    return name
+
+
+def load_layout(name):
+    """Make layout `name` the current settings; returns the new config."""
+    number = find_layout(clean_layout_name(name))
+    layout = read_layout(number) if number else None
+    if layout is None:
+        raise ValueError(f"there is no layout called {name!r}")
+    _, picture, label, look = layout
+    config = {"picture": None, "picture_label": None, **look}
+    if picture:
+        current = "picture" + os.path.splitext(picture)[1]
+        _remove_matching(DATA_DIR, "picture.", keep=current)
+        shutil.copyfile(os.path.join(LAYOUTS_DIR, picture),
+                        os.path.join(DATA_DIR, current))
+        config["picture"], config["picture_label"] = current, label
+    return config
+
+
+def delete_layout(name):
+    number = find_layout(clean_layout_name(name))
+    if number is None:
+        raise ValueError(f"there is no layout called {name!r}")
+    _remove_matching(LAYOUTS_DIR, f"{number}.")
 
 
 def check_picture(data):
@@ -364,63 +434,51 @@ class CrystalLcdService(win32serviceutil.ServiceFramework):
         cmd = req.get("cmd")
         if cmd == "status":
             return self._status()
-        if cmd == "set_picture":
-            data = base64.b64decode(req["data"])
-            ext = check_picture(data)
+        if cmd == "apply":
+            # Everything the window's Apply button sends: the look, and
+            # optionally a new picture ({"name", "data"}) or "default".
             config = load_config()
-            name = "picture" + ext
-            for old in os.listdir(DATA_DIR):
-                if old.startswith("picture.") and old != name:
-                    os.remove(os.path.join(DATA_DIR, old))
-            with open(os.path.join(DATA_DIR, name), "wb") as f:
-                f.write(data)
-            config["picture"] = name
-            config["picture_label"] = os.path.basename(str(req.get("name") or name))[:100]
-            self._apply_fit(config, req)
-            return self._saved(config, f"picture set: {config['picture_label']}")
-        if cmd == "set_fit":
-            config = load_config()
-            self._apply_fit(config, req)
-            return self._saved(config, "fit changed")
-        if cmd == "reset_picture":
-            config = load_config()
-            config["picture"] = config["picture_label"] = None
-            return self._saved(config, "back to the default picture")
+            picture = req.get("picture")
+            what = "settings applied"
+            if isinstance(picture, dict):
+                store_picture(config, base64.b64decode(picture.get("data") or ""),
+                              picture.get("name"))
+                what = f"picture set: {config['picture_label']}"
+            elif picture == "default":
+                config["picture"] = config["picture_label"] = None
+                what = "back to the default picture"
+            config.update(clean_look(req.get("look")))
+            return self._saved(config, what)
+        if cmd == "save_layout":
+            name = save_layout(req.get("name"))
+            log.info("layout saved: %s", name)
+            return self._status()
+        if cmd == "load_layout":
+            config = load_layout(req.get("name"))
+            return self._saved(config, f"layout loaded: {req.get('name')}")
+        if cmd == "delete_layout":
+            delete_layout(req.get("name"))
+            log.info("layout deleted: %s", req.get("name"))
+            return self._status()
         if cmd == "set_autostart":
             set_start_type(bool(req.get("on")))
             log.info("start with Windows: %s", bool(req.get("on")))
             return self._status()
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
-    @staticmethod
-    def _apply_fit(config, req):
-        if "fit" in req:
-            if req["fit"] not in FIT_MODES:
-                raise ValueError(f"fit must be one of {', '.join(FIT_MODES)}")
-            config["fit"] = req["fit"]
-        if "fit_color" in req:
-            # Raises ValueError if bad; stored as #rrggbb, the form
-            # load_config accepts.
-            r, g, b = ImageColor.getrgb(req["fit_color"])[:3]
-            config["fit_color"] = f"#{r:02x}{g:02x}{b:02x}"
-
     def _saved(self, config, what):
         save_config(config)
-        log.info("%s (fit %s, %s)", what, config["fit"], config["fit_color"])
+        log.info("%s (%s)", what, " ".join(clock_argv(config)[1:]))
         if self.display:
             self.display.reload()
         return self._status()
 
     def _status(self):
-        config = load_config()
         if self.display:
             state, detail, temps = self.display.state, self.display.detail, self.display.temps
         else:
             state, detail, temps = "idle", "", ""
         return {"ok": True, "state": state, "detail": detail, "temps": temps,
-                "picture": config["picture"] or DEFAULT_PICTURE,
-                "custom_picture": bool(config["picture"]),
-                "fit": config["fit"], "fit_color": config["fit_color"],
                 "autostart": start_type()}
 
 

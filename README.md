@@ -65,25 +65,65 @@ Open **CrystalX LCD** from the Start menu, or click its icon near the clock
 (it may be hidden behind the **^** arrow). Right-clicking the icon gives
 **Show** and **Quit**.
 
-The window has everything in one place, with a preview of the screen on the
-left:
+The window has everything in one place. On the left is a **preview** of the
+screen, with example readings. It updates as you change things, and nothing
+reaches the case screen until you click **Apply**.
 
-- **Display** — shows what the screen is doing, for example *Showing on COM5*.
-  **Stop display** turns the screen off and frees it for other programs such as
-  LCD Control; **Start display** brings the clock back. No admin prompts.
-- **Picture** — **Choose file…** to use your own GIF or picture (GIF, PNG, JPEG,
-  WEBP or BMP), or **Use default** for the rooftop GIF. Then choose how it
-  fills the tall screen:
-  - **Fill** crops it to cover the whole screen;
-  - **Fit** shows the whole picture, with the empty space filled by
-    **blurred edges** or a **solid colour** you pick.
+At the top, **Display** shows what the screen is doing, for example *Showing
+on COM5*. **Stop display** turns the screen off and frees it for other
+programs such as LCD Control; **Start display** brings the clock back. No
+admin prompts.
 
-  The preview updates as you go. Click **Apply** to send it to the screen, or
-  **Undo changes**.
-- **Options** — **Start display with Windows** decides whether the clock comes
-  on by itself when the PC starts.
-- **Open log** shows what the app has been doing — useful if something goes
-  wrong.
+Below it are five tabs:
+
+- **Picture** — **Choose file…** to use your own GIF or picture (GIF, PNG,
+  JPEG, WEBP or BMP), or **Use default** for the rooftop GIF.
+  - **Fill** crops it to cover the whole screen. **Fit** shows the whole
+    picture, with the empty space filled by **blurred edges** or a **solid
+    colour** you pick.
+  - **Drag the preview** to choose which part of the picture shows, and
+    **scroll on it** (or use the **Zoom** slider) to zoom in, up to 4×.
+    **Reset position** centres it again.
+  - The best picture size is **320 × 1476 px**, or larger in the same tall
+    shape. The tab shows your picture's size and warns you if it's small
+    enough to look blurry.
+  - It also shows the **empty space between the clock and the stats** in
+    pixels — for example *320 × 931 px, from 137 to 1068 px down* — in case
+    you want a picture whose subject fits exactly in that gap.
+- **Clock** — the **time** and the **date**, each of which you can switch off.
+  - Time: 12-hour with or without AM/PM, or 24-hour, with or without seconds.
+  - Date: pick a ready-made format, or choose **Custom pattern…** and write
+    your own with codes such as `ddd D-MMM-YYYY` (the codes are listed under
+    the box).
+  - A size slider and a colour for each. The size stops at the largest that
+    still fits the screen's width. Without AM/PM, the clock can be about twice
+    as big.
+  - **Height on screen** moves the clock up or down. You can also drag it in
+    the preview.
+- **Stats** — up to 7 readings, in spots laid out like the screen: three rows
+  of two and one at the bottom. **Show the stats** switches them all off;
+  your choices are kept for when you switch them back on.
+  - Pick a reading for each spot, or **Empty**. If one spot in a row is empty,
+    the other moves to the middle.
+  - The box under each spot is the name shown on the screen; type your own,
+    for example `CPU` instead of `CPU Temp`.
+  - **One per row** gives each reading its own line with much bigger numbers.
+  - Size sliders and colours for the names and the numbers, and **Height on
+    screen** (or drag the block in the preview).
+- **Style** — the **font**, chosen from every font installed on the PC, each
+  shown in its own style. And the **frosted panel** behind the text: how dark
+  and how blurred, or off.
+- **Options**
+  - **Start display with Windows** decides whether the clock comes on by
+    itself when the PC starts.
+  - **Saved layouts**: **Save as…** keeps everything on the screen, the
+    picture too, under a name. **Load** brings it back. Up to 10.
+
+**Reset to defaults** puts everything back as it came, but keeps your picture.
+**Undo changes** goes back to what's on the screen now.
+
+**Open log** shows what the app has been doing — useful if something goes
+wrong.
 
 **Closing the window** with **X** only hides it; the clock keeps running.
 **Quit** (right-click the icon) stops the display and closes the app until your
@@ -98,11 +138,15 @@ screen and can't be changed. The app takes over as soon as Windows starts.
 
 **To update:** download the newer `CrystalX-LCD-Setup-<version>.exe` from the
 [releases page](https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows/releases)
-and run it. Your picture and settings are kept.
+and run it. Your picture, settings and saved layouts are kept.
 
 **To uninstall:** open **Settings → Apps**, find **CrystalX LCD** and click
 **Uninstall**. This removes the app, the service, the Start menu entry, the
 icon at login, and your chosen picture, settings and log.
+
+If you have **saved layouts**, it asks whether to delete them too. Choose
+**No** to keep them: they stay in `C:\ProgramData\CrystalX LCD\layouts` and
+come back if you install the app again.
 
 **PawnIO stays installed** on purpose: it's a shared driver that other
 programs (for example LibreHardwareMonitor or FanControl) also use. If you

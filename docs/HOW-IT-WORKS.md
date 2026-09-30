@@ -191,8 +191,8 @@ script by hand.
 
 ### 8. Use `%#I`, not `%-I`, to drop leading zeros
 
-`TIME_FMT` and `DATE_FMT` use `%#I` / `%#d` so the clock reads `3:25`, not
-`03:25`. The `%-I` / `%-d` form found in many Python examples is not supported
+`TIME_FORMATS` and the date codes (`DATE_CODES`) use `%#I` / `%#d` so the
+clock reads `3:25`, not `03:25`. The `%-I` / `%-d` form found in many Python examples is not supported
 on Windows and raises `ValueError: Invalid format string`.
 
 ---
@@ -201,7 +201,8 @@ on Windows and raises `ValueError: Invalid format string`.
 
 - Font, font sizes, text positions, margins
 - Which GIF is played, its FPS, JPEG quality
-- Clock and date formats (`TIME_FMT`, `DATE_FMT` in `clock_win.py`)
+- Clock and date formats (`--time-format`, `--date-format`; `TIME_FORMATS`
+  and `DATE_CODES` in `clock_win.py`)
 - Which stats are shown (`--slots`) and how often they refresh
 - Width, **downwards only** — 320 is the maximum for the rooftop GIF, even
   though `MAX_PIXELS` currently lets 324–329 through (see constraint 2)
@@ -280,14 +281,15 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 | `AGENTS.md`, `CLAUDE.md` | Rules for AI coding assistants working on the repo |
 | **The engine** | |
 | `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, `fit_frame`, which `clock_win.py` imports. **The core driver — treat with care.** |
-| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. Its `main()` is also what the service runs. |
+| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. Its `main()` is also what the service runs, and its `preview()` draws the app's preview. |
 | `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
 | `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
 | `retro_pixel_guy_smoking_on_rooftop.gif` | The default picture |
 | **The app** | |
 | `service_win.py` | The Windows service: runs the engine from boot, answers the window over a pipe |
 | `tray_win.py` | The window and the notification-area icon |
-| `ipc_win.py` | Shared by both: the version, names, paths, settings file and pipe protocol |
+| `ipc_win.py` | Shared by both: the version, names, paths and pipe protocol |
+| `settings_win.py` | Shared by both: the display settings, their defaults and checks, the `clock_win` options they become, and saved layouts |
 | `assets/` | The app icon and the script that draws it |
 | `packaging/crystalx-lcd.spec` | PyInstaller recipe: both programs, one folder, one bundled Python |
 | `packaging/installer.iss` | Inno Setup script for `CrystalX-LCD-Setup-<version>.exe` |
@@ -329,6 +331,36 @@ Inside a `.cmd` file a `%` must be written twice, so `ram%` becomes `ram%%`
 (see the comment at the top of `run-clock.cmd`). On the command line a single
 `%` is fine.
 
+Everything the app's window can set is an option here too. The app turns its
+settings into exactly these options (`settings_win.engine_argv`):
+
+| Option | What it does |
+|---|---|
+| `--fit fill\|blur\|color`, `--fit-color` | Place the picture on a panel-shaped canvas (see [Fitting any picture](#the-app-service-window-and-installer)) |
+| `--zoom 1–4`, `--pan-x 0–1`, `--pan-y 0–1` | With `--fit`: enlarge the picture, and choose which part shows — 0 lines up its left (top) edge with the screen's, 1 its right (bottom) edge, 0.5 centres it |
+| `--time-format 12h\|12h-plain\|24h`, `--seconds` | `3:25 PM`, `3:25` or `15:25`, optionally with seconds |
+| `--date-format PATTERN` | The date, from the codes below (default `(ddd) D-MMM-YYYY`) |
+| `--no-time`, `--no-date`, `--no-stats` | Leave that part out |
+| `--time-size`, `--date-size`, `--label-size`, `--value-size` | Text sizes in px; each shrinks to fit the width if too big |
+| `--time-color`, `--date-color`, `--label-color`, `--value-color` | Text colours (default white); the black outline always stays |
+| `--clock-pos 0–1`, `--stats-pos 0–1` | Height of the clock block and the stats block, from top (0) to bottom (1) |
+| `--slots`, `--columns 1\|2`, `--label SLOT=TEXT` | The stats, their layout and their names — see [Stats slots](#stats-slots) |
+| `--font`, `--no-frost`, `--frost-dark 0–1`, `--frost-blur` | Font file, and the frosted panel behind the text |
+
+**Date codes.** Everything else in the pattern is printed as written; put text
+in `[square brackets]` to keep a letter such as the D in `[Today]` from turning
+into a day number.
+
+| Code | Gives | Code | Gives |
+|---|---|---|---|
+| `ddd` | Wed | `dddd` | Wednesday |
+| `D` | 5 | `DD` | 05 |
+| `MMM` | Sep | `MMMM` | September |
+| `M` | 9 | `MM` | 09 |
+| `YY` | 26 | `YYYY` | 2026 |
+
+Day and month names are always in English.
+
 ### Clock and date sizing
 
 Both lines are **centred** and sized automatically: they grow until they span
@@ -343,12 +375,24 @@ the same width as each other and scale together.
 | **`0.82`** | **48px** | **22px** — the default |
 | `0.75` | 44px | 20px |
 
-They are sized against the widest string each can ever produce — `12:00 PM`
-beats `1:05 AM`, and a two-digit day beats the one-digit day `%#d` can produce —
-so neither can outgrow the frosted panel at runtime.
+They are sized against the widest string each can ever produce: every hour of
+the day for the clock, every day of a year for the date. So `12:00 PM` beats
+`1:05 AM`, and a two-digit day beats the one-digit day `D` can produce, and
+neither can outgrow the frosted panel at runtime.
 
-`--time-size` and `--date-size` still cap either line individually if you want
-them sized independently rather than matched.
+`--time-size` and `--date-size` size either line on its own instead, up to the
+full width. How big that can be depends on the format:
+
+| Format | Largest that fits (Consolas Bold) |
+|---|---|
+| `12:00 PM`, or `23:59:59` | 59px |
+| `12:00` (no AM/PM, or 24-hour) | 95px |
+| `12:00:00 PM` | 42px |
+| `(Wed) 30-Sep-2026` | 28px |
+| `2026-09-30` | 48px |
+| `Wednesday, 30 September 2026` | 17px |
+
+The app's size sliders stop at exactly these limits (`Layout.limits`).
 
 ### Tuning the layout without stopping the panel
 
@@ -378,7 +422,14 @@ Images and GIFs only. Video would need ffmpeg.
 ## Stats slots
 
 `--slots` takes a comma-separated list, filling the grid **two per row**. An odd
-one at the end is **centred across the full width**.
+one at the end is **centred across the full width**. `-` is an **empty spot**:
+in a row with one, the other stat is centred, and a row with both empty is left
+out, so the screen never shows a hole. The app always has seven spots (three
+rows of two and one centred, `MAX_SPOTS`), each a reading or `-`.
+
+`--columns 1` gives every stat its own centred row instead, which lets the
+values grow to 68 px. `--label cputemp=CPU` renames a stat on screen; the name
+counts towards the width like any other.
 
 Default: `cpu,cputemp,gpu,gputemp,ram%,disk%,net`
 
@@ -389,7 +440,7 @@ CPU Usage       CPU Temp
 GPU Usage       GPU Temp
 8%                  51°C
 
-RAM Usage    Drive Usage
+RAM Usage     Disk Usage
 53%                   0%
 
       Net D/U MB/s
@@ -410,14 +461,18 @@ RAM Usage    Drive Usage
 | `netdown` | Net Down | `12.4M/s` | |
 | `netup` | Net Up | `1.4M/s` | |
 | `diskio` | Disk I/O | `1.1M/s` | read + write throughput |
-| `disk%` | Drive Usage | `29%` | how hard the drives are working — see below |
+| `disk%` | Disk Usage | `29%` | how hard the drives are working — see below |
 | `storage` | Storage Used | `66%` | space consumed, every fixed drive pooled |
 | `disk` | Disk Free | `64G` | system drive only |
 | `procs` | Processes | `229` | |
 | `uptime` | Uptime | `1h 41m` | |
 
 Both fonts are sized against the **widest plausible value** of every chosen
-slot, so a reading can never outgrow its column once running.
+slot, so a reading can never outgrow its column once running. All names share
+one size, and so do all values, so **one long name shrinks every name**: a
+side column holds 125 px, which fits `Disk Usage` at up to 22 px but
+`Drive Activity` at only 15 px. That is why `disk%` is called *Disk Usage*
+(it was *Drive Usage* before v1.1.0).
 
 ### How often readings update
 
@@ -436,7 +491,7 @@ frames to be re-encoded.
 
 These are easy to confuse and they measure completely different things.
 
-**`disk%` — Drive Usage.** How hard the drives are working right now. Idles at
+**`disk%` — Disk Usage.** How hard the drives are working right now. Idles at
 0–2% and spikes when they are actually being read or written. Averaged across
 the physical disks so all of them together make 100%, meaning one disk pinned
 out of three reads about 33%:
@@ -574,6 +629,25 @@ each way (`ipc_win.request`). If the display is off, the window starts the
 service with the argument `--idle`: it then only applies settings, touches no
 hardware, and stops itself 20 seconds after the last request.
 
+The settings (`settings_win.py`) are the **picture** — a file the service keeps
+— and the **look**: everything else that decides what the screen shows (fit,
+zoom and pan, clock and date formats, sizes, colours, positions, the seven stat
+spots and their names, font, frosted panel). Hiding the time, the date or the
+stats (`show_stats`) keeps their other settings for when they are shown again.
+They live in `config.json`; a v1.0
+file, with only the picture and fit, loads with defaults for the rest.
+
+| Command | What the service does |
+|---|---|
+| `apply` | Stores the look, and optionally a new picture (sent as bytes) or `"default"`, then restarts the display. The window's one **Apply** button sends everything in this one message |
+| `save_layout`, `load_layout`, `delete_layout` | A **saved layout** is `layouts\<n>.json` (n = 1–10) with the look, plus `<n>.<ext>`, its own copy of its picture. Saving takes what is on the screen, so the window applies unsaved changes first |
+| `set_autostart` | Switches the service between automatic and manual start |
+| `status` | What the display is doing, for the window's status line |
+
+The window reads `config.json` and the layout list straight from the folder
+(users may read it), so it shows the settings even while the service is
+stopped.
+
 **Security.** The service runs as SYSTEM, so everything a normal user can reach
 is kept narrow:
 
@@ -586,17 +660,48 @@ is kept narrow:
 | The window never sends a file path — it reads the picture and sends the bytes | Otherwise any program could get SYSTEM to open files on its behalf |
 | The service checks every picture (format, size ≤ 50 MB, ≤ 300 frames) and keeps its own copy | A long GIF held in memory at panel size could otherwise eat gigabytes |
 | `C:\ProgramData\CrystalX LCD` is writable only by SYSTEM and administrators | A user can't plant a picture or settings file for the service to read |
+| Every setting, from the pipe or from a file, goes through `settings_win.clean_look` | Only known keys, types and ranges reach the engine; anything else falls back to its default |
+| Fonts are only taken from `C:\Windows\Fonts`, by file name | The service never opens a path the user chose; fonts installed for one user only are therefore not offered |
 
 **Fitting any picture.** Pictures chosen in the app are placed on a canvas of
 the tested 320 × 1476 frame (`fit_frame`): *fill* crops to cover it, *blur* and
 *color* show the whole picture with blurred or solid edges. So every picture,
 whatever its shape, stays inside the pixel ceiling (constraint 2).
 
-**The window** is tkinter. Its preview runs `clock_win.main(..., "--preview",
-"--sample-stats")` in the background, so it shows exactly what the panel will
-show, with example readings instead of loading the sensors. It starts hidden
-with `--hidden` (at login); starting it again (Start menu) tells the running
-copy to show its window.
+**Zoom and pan.** `--zoom` enlarges the fitted picture (1–4×), and `--pan-x`
+/ `--pan-y` choose where it sits: 0 lines its left (top) edge up with the
+screen's, 1 its right (bottom) edge, 0.5 centres it (`fit_geometry`). Both are
+proportions, so they mean the same on the panel and in the smaller preview.
+Only the part of the picture that lands on the screen is resampled, so zooming
+into a large photo costs no more than showing it whole.
+
+**The window** is tkinter: status and Start/Stop at the top, the settings in
+five tabs (Picture, Clock, Stats, Style, Options), and one Apply / Undo for all
+of them. Its preview is drawn by `clock_win.preview()` — the engine itself, with
+the same options the service will get (`settings_win.engine_argv`) and example
+readings instead of the sensors — so it shows exactly what the panel will show.
+It redraws on every change in 15–50 ms, and never queues redraws: while one
+runs, only the newest waits.
+
+- **Dragging** on the preview moves the clock or stats block when grabbed by
+  its panel, and the picture anywhere else; the wheel zooms around the
+  pointer. The preview works from the picture's first frame, opened once and
+  scaled down to 2048 px at most (placement is in proportions, so it looks the
+  same).
+- **Size sliders** stop at the largest size that fits (`Layout.limits`);
+  sizes and positions left automatic show what the engine chose.
+- **The free space** between the clock and stats blocks is shown in panel
+  pixels on the Picture tab (from the layout's `clock_box` and `stats_box`),
+  for anyone making a picture to fit it. Messages that come and go sit in
+  fixed-size boxes, so the window never changes size.
+- **Fonts**: the Style tab lists every font in `C:\Windows\Fonts`, each drawn
+  in its own style. Reading their names takes about a second, so it happens
+  in the background, only once the Style tab is first opened.
+
+It starts hidden with `--hidden` (at login); starting it again (Start menu)
+tells the running copy to show its window. While hidden it only keeps the
+tray tooltip up to date: it reads neither the settings nor the layouts, draws
+nothing, and lets go of the preview's picture.
 
 **The installer** (`packaging/installer.iss`, Inno Setup):
 
@@ -610,8 +715,12 @@ copy to show its window.
 - adds the Start menu entry and `CrystalXLCD.exe --hidden` under `HKLM\...\Run`;
 - offers to disable LCD Control's `LCD ControlPowerBoot` task;
 - on uninstall, stops everything, deletes the service and
-  `C:\ProgramData\CrystalX LCD`. PawnIO is left in place: it is a shared
-  driver with its own uninstaller.
+  `C:\ProgramData\CrystalX LCD`. If there are saved layouts it first asks
+  whether to delete them too (No is the default; a silent uninstall keeps
+  them); kept, only the `layouts` folder stays, and a reinstall picks them up.
+  This is done in `CurUninstallStepChanged`, because `[UninstallDelete]` cannot
+  depend on a question. PawnIO is left in place: it is a shared driver with its
+  own uninstaller.
 
 Its `AppId` must never change — Windows uses it to recognise upgrades.
 
@@ -697,25 +806,90 @@ Two details that matter:
 
 ## Performance
 
-Measured on a Ryzen 5 5600, at 10 FPS, 320 × 1476, with stats:
+The service runs all day and the window app sits in the tray at every login,
+so both are kept as light as they can be. Measured on the test machine (Ryzen 5
+5600, 12 threads) on 2026-09-30, v1.0.0 against v1.1.0, same settings, 60
+seconds after settling. "% of one core" is one CPU thread; divide by 12 for the
+whole CPU.
 
-**7.6% of one core, 142 MB RAM.**
+**The display (the service's engine)**, rooftop GIF, all seven stats with live
+sensors, 10 FPS:
 
-Per-frame cost:
+| Picture | v1.0.0 CPU | v1.1.0 CPU | v1.0.0 RAM | v1.1.0 RAM |
+|---|---|---|---|---|
+| Rooftop GIF (59 frames), the default | 11.9% of one core | **4.9%** | 179 MB | **79 MB** |
+| A 300-frame GIF, the most allowed | 12.0% | **4.6%** | 636 MB | **121 MB** |
+| A still picture | 1.0% | **0.7%** | 68 MB | 72 MB |
 
-| Stage | Time |
-|---|---|
-| copy + frost (2 panels, blur 9) | 4.64 ms |
-| draw text | 1.52 ms |
-| rotate 180° | 0.74 ms |
-| JPEG encode (q88, no subsampling) | 1.58 ms |
-| USB write (≈107 KB) | 6.7 ms |
+The installed v1.0.0 service, measured live on the same PC, used 10.9% of one
+core and 171 MB, which matches the first row. Neither version uses the GPU at
+all (0% in Windows' GPU counters): everything is drawn in software.
 
-The port sustains **15.5 MB/s**. At 10 FPS the GIF needs 0.67 MB/s, so there is
-an enormous margin — frame rate is not a constraint on this transport.
+**The window app:**
 
-Frames are cached and re-encoded only when the displayed text changes. To reduce
-the cost: raise the stats interval, lower `--fps`, or use `--no-stats`.
+| Moment | v1.0.0 CPU | v1.1.0 CPU | v1.0.0 RAM | v1.1.0 RAM |
+|---|---|---|---|---|
+| First 10 s after login, hidden | 6.4% | **0.0%** | 41 MB | 39 MB |
+| Hidden in the tray | 0.0% | 0.0% | 41 MB | 39 MB |
+| Window open, idle | 0.7% | **0.0%** | 41 MB | 56 MB |
+| Window hidden again | 0.0% | 0.0% | 41 MB | 44 MB |
+
+v1.0.0 drew its preview at login even while hidden; v1.1.0 draws nothing until
+the window opens. The window itself takes more memory while open (more
+controls, and the picture its preview is made from), and lets go of the
+picture when hidden.
+
+### Where the display's time goes
+
+v1.0.0 did everything for every frame sent: frost the two panels, draw the
+text, turn the frame upside down, encode it. v1.1.0 does per frame only what
+has to be:
+
+| Step | v1.0.0 | v1.1.0 |
+|---|---|---|
+| Frost the panels (blur 9) | every frame, ~4.6 ms | once per frame at load (`prepare`) |
+| Turn upside down | every frame, 0.7 ms | once per frame at load |
+| Draw the text (20 strings with outlines) | every frame, ~4.4 ms | once per change, ~7 ms every 2 s (`text_bands`) |
+| Unpack the frame | — | every frame, ~2.5 ms (zlib) |
+| Lay the text over it | — | ~0.3 ms |
+| JPEG encode (q88, no subsampling) | 1.6 ms | 1.6 ms |
+| **Total per frame** | **~12.6 ms** | **~4.9 ms** |
+
+The text is drawn on a transparent layer and laid over each frame. Every glyph
+has a black outline, so this matches drawing on the frame itself, bar about 20
+of 472,320 pixels a few shades apart (see `text_bands`).
+
+**Memory** is mostly the frames. v1.0.0 held every frame at panel size, 1.4 MB
+each: 80 MB for the rooftop GIF, over 400 MB for a 300-frame GIF (636 MB in
+all). v1.1.0 keeps them zlib-compressed, which is lossless (80 MB → under
+9 MB), makes and packs them one at a time as they load so the full set never
+exists at once, and drops finished JPEGs as soon as the text changes (they can
+never be sent again). The rest is Python with Pillow (~21 MB) and the sensor
+library on .NET (~40 MB).
+
+Also in the loop: the panel still gets 10 frames a second; a still picture is
+kept unpacked, since there is nothing to gain; and a frame's JPEG is reused
+while the text stays the same (a clock without stats changes once a minute).
+
+### The port
+
+USB write of a frame (≈107 KB) takes about 6.7 ms of waiting, not CPU. The
+port sustains **15.5 MB/s**; at 10 FPS the GIF needs 0.67 MB/s, so there is an
+enormous margin — frame rate is not a constraint on this transport.
+
+### How to measure
+
+Run the loop exactly as the service does, with the same options
+(`clock_win.main(argv, stop, log)`), but with `clock_win.Panel` replaced by a stand-in whose
+`send` only counts frames: the real panel stays untouched and the numbers
+include the sensors. Wait for frames to flow, let it settle 10 s, then take
+the process's CPU time and memory over 60 s (`psutil.Process().cpu_times()`,
+`memory_info()`). Compare versions on the same picture and settings. To measure
+the window app, run it hidden with a stand-in service (see `AGENTS.md`,
+Testing) and sample the same way while it sits hidden, then open.
+
+To use less still: lower `--fps`, raise the stats interval, or use
+`--no-stats`.
 
 ---
 

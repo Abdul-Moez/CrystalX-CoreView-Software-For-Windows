@@ -13,7 +13,9 @@
 ;              Start menu entry and starts the tray app at every login
 ;   upgrade    the same, over the old version, keeping the user's settings
 ;   uninstall  removes all of that plus C:\ProgramData\CrystalX LCD (the
-;              picture, settings and log). PawnIO stays: it is a shared driver
+;              picture, settings and log). If there are saved layouts it asks
+;              first whether to delete them too; kept, they come back when the
+;              app is installed again. PawnIO stays: it is a shared driver
 ;              other programs may use, and it has its own uninstaller.
 
 #ifndef AppVersion
@@ -114,10 +116,53 @@ Filename: "{app}\CrystalXLCD.exe"; Description: "Open {#AppName}"; \
 Filename: "{sys}\sc.exe"; Parameters: "delete CrystalXLCD"; \
   Flags: runhidden waituntilterminated; RunOnceId: "DeleteService"
 
-[UninstallDelete]
-Type: filesandordirs; Name: "{commonappdata}\{#AppName}"
+; C:\ProgramData\CrystalX LCD is removed by CurUninstallStepChanged below
+; rather than [UninstallDelete], which cannot depend on the question it asks.
 
 [Code]
+var
+  KeepLayouts: Boolean;
+
+function DataDir: String;
+begin
+  Result := ExpandConstant('{commonappdata}\{#AppName}');
+end;
+
+{ How many layouts the user saved (layouts\1.json to 10.json). }
+function SavedLayouts: Integer;
+var
+  Found: TFindRec;
+begin
+  Result := 0;
+  if FindFirst(DataDir + '\layouts\*.json', Found) then
+  try
+    repeat
+      Result := Result + 1;
+    until not FindNext(Found);
+  finally
+    FindClose(Found);
+  end;
+end;
+
+{ The data folder, all but its layouts folder. }
+procedure DeleteAllButLayouts;
+var
+  Found: TFindRec;
+begin
+  if FindFirst(DataDir + '\*', Found) then
+  try
+    repeat
+      if (Found.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0 then
+        DeleteFile(DataDir + '\' + Found.Name)
+      else if (Found.Name <> '.') and (Found.Name <> '..')
+          and (CompareText(Found.Name, 'layouts') <> 0) then
+        DelTree(DataDir + '\' + Found.Name, True, True, True);
+    until not FindNext(Found);
+  finally
+    FindClose(Found);
+  end;
+end;
+
 function ServiceExists: Boolean;
 begin
   Result := RegKeyExists(HKLM64, 'SYSTEM\CurrentControlSet\Services\CrystalXLCD');
@@ -175,8 +220,44 @@ begin
   Result := '';
 end;
 
+{ Saved layouts are the one thing someone may want back after reinstalling,
+  so ask before deleting them. No is the default, and a silent uninstall
+  keeps them. }
+function AskKeepLayouts: Boolean;
+var
+  Count: Integer;
+  Noun: String;
+begin
+  Count := SavedLayouts;
+  Result := False;
+  if Count = 0 then
+    Exit;
+  if UninstallSilent then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if Count = 1 then Noun := 'layout' else Noun := 'layouts';
+  Result := SuppressibleMsgBox(
+    Format('You have %d saved %s. Delete them too?', [Count, Noun]) + #13#10#13#10 +
+    'Choose No to keep them: they stay in ' + DataDir + '\layouts and come back ' +
+    'if you install {#AppName} again.',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDNO;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
     StopApp;
+    KeepLayouts := AskKeepLayouts;
+  end;
+  if CurUninstallStep = usPostUninstall then
+  begin
+    { The service is deleted by now, so nothing holds the log open. }
+    if KeepLayouts then
+      DeleteAllButLayouts
+    else
+      DelTree(DataDir, True, True, True);
+  end;
 end;

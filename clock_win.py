@@ -29,8 +29,8 @@ the output never grows past the panel's pixel ceiling.
   transport   the panel's COM port (see lcd_win.py)
   frames      Pillow, so nothing extra to install
   fonts       the Windows font directories
-  stats       load and memory from psutil and Windows performance counters,
-              no temperatures yet (see Metrics below)
+  stats       load and memory from psutil and Windows performance counters;
+              temperatures from temps_win (see Metrics below)
 
 Usage:
     clock_win.py <source> [--width 320] [--fps 10] [--font consolab.ttf]
@@ -38,22 +38,39 @@ Usage:
 
 import argparse
 import atexit
+import datetime
+import functools
 import os
+import re
 import struct
 import sys
 import time
+import zlib
 from io import BytesIO
 
 import psutil
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
-from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, Panel, install_handlers,
-                     load_frames)
+from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, MAX_ZOOM, Panel, fit_frame,
+                     fit_size, install_handlers, load_frames)
 
-# %#I / %#d drop the leading zero on Windows. The %-I form found in many
-# Python examples is not supported here and raises ValueError.
-TIME_FMT = "%#I:%M %p"          # 3:25 PM
-DATE_FMT = "(%a) %#d-%b-%Y"     # (Sun) 20-Sep-2026
+# The clock's formats: (without seconds, with seconds). %#I / %#d drop the
+# leading zero on Windows. The %-I form found in many Python examples is not
+# supported here and raises ValueError.
+TIME_FORMATS = {
+    "12h":       ("%#I:%M %p", "%#I:%M:%S %p"),     # 3:25 PM
+    "12h-plain": ("%#I:%M", "%#I:%M:%S"),           # 3:25
+    "24h":       ("%H:%M", "%H:%M:%S"),             # 15:25
+}
+# The date is written as a pattern of these codes (see date_strftime).
+DATE_FORMAT = "(ddd) D-MMM-YYYY"                    # (Sun) 20-Sep-2026
+DATE_CODES = {
+    "dddd": "%A", "ddd": "%a",                      # Sunday, Sun
+    "DD": "%d", "D": "%#d",                         # 05, 5
+    "MMMM": "%B", "MMM": "%b", "MM": "%m", "M": "%#m",   # September, Sep, 09, 9
+    "YYYY": "%Y", "YY": "%y",                       # 2026, 26
+}
+_DATE_TOKEN = re.compile(r"\[([^\]]*)\]|dddd|ddd|DD|D|MMMM|MMM|MM|M|YYYY|YY")
 
 FONT_DIRS = [
     os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
@@ -91,6 +108,11 @@ def resolve_font(spec):
              f"{FONT_DIRS[0]} (for example consolab.ttf or segoeuib.ttf)")
 
 
+@functools.lru_cache(maxsize=64)
+def _font(path, size):
+    return ImageFont.truetype(path, size)
+
+
 def fit_font(path, samples, max_width, start):
     """Largest size at or below `start` that keeps every sample inside max_width.
 
@@ -100,18 +122,24 @@ def fit_font(path, samples, max_width, start):
     """
     if isinstance(samples, str):
         samples = [samples]
+    return _font(path, _fit_size(path, tuple(samples), max_width, start))
+
+
+@functools.lru_cache(maxsize=512)
+def _fit_size(path, samples, max_width, start):
+    # Cached: the app's preview asks the same questions on every redraw.
     if not samples:
-        return ImageFont.truetype(path, start)
+        return start
 
     def fits(size):
-        font = ImageFont.truetype(path, size)
+        font = _font(path, size)
         return all(font.getlength(s) <= max_width for s in samples)
 
     # Width grows monotonically with size, so this can bisect rather than step
     # down one point at a time -- which matters now that the clock starts its
     # search from the full panel width rather than a small cap.
     if fits(start):
-        return ImageFont.truetype(path, start)
+        return start
     low, high = 8, start
     while low < high:
         mid = (low + high + 1) // 2
@@ -119,7 +147,49 @@ def fit_font(path, samples, max_width, start):
             low = mid
         else:
             high = mid - 1
-    return ImageFont.truetype(path, low)
+    return low
+
+
+@functools.lru_cache(maxsize=64)
+def _widest(path, samples, keep=4):
+    """The few widest of many candidate strings, measured at one size.
+
+    A date has 365 possible strings; sizing against only the widest handful
+    gives the same answer far faster.
+    """
+    font = _font(path, 48)
+    return tuple(sorted(set(samples), key=font.getlength, reverse=True)[:keep])
+
+
+def date_strftime(pattern):
+    """Turn a date pattern such as "ddd D-MMM-YYYY" into a strftime format.
+
+    The codes are in DATE_CODES; text in [square brackets] is kept as it is,
+    so "[Today:] D MMM" does not turn the D of "Today" into a day number.
+    """
+    out, pos = [], 0
+    for m in _DATE_TOKEN.finditer(pattern):
+        out.append(pattern[pos:m.start()].replace("%", "%%"))
+        literal = m.group(1)
+        out.append(literal.replace("%", "%%") if literal is not None
+                   else DATE_CODES[m.group(0)])
+        pos = m.end()
+    out.append(pattern[pos:].replace("%", "%%"))
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=16)
+def time_samples(fmt):
+    """Every width the clock can take: each hour, with a spread of minutes."""
+    return tuple(datetime.datetime(2026, 1, 1, hour, minute, minute).strftime(fmt)
+                 for hour in range(24) for minute in (0, 8, 44, 58))
+
+
+@functools.lru_cache(maxsize=16)
+def date_samples(fmt):
+    """Every date of a year, so the widest day and month names are covered."""
+    day = datetime.date(2026, 1, 1)
+    return tuple((day + datetime.timedelta(n)).strftime(fmt) for n in range(365))
 
 
 def _pct(v):
@@ -243,7 +313,7 @@ SLOTS = {
     "netdown":  ("Net Down",     "99.9M/s", lambda m, r: _rate(r.get("net_down"))),
     "netup":    ("Net Up",       "99.9M/s", lambda m, r: _rate(r.get("net_up"))),
     "diskio":   ("Disk I/O",     "99.9M/s", lambda m, r: _rate(r.get("disk_io"))),
-    "disk%":    ("Drive Usage",  "100%",    lambda m, r: _pct(m.diskact.read())),
+    "disk%":    ("Disk Usage",   "100%",    lambda m, r: _pct(m.diskact.read())),
     "storage":  ("Storage Used", "100%",    lambda m, r: m.drives_used()),
     "disk":     ("Disk Free",    "999G",    lambda m, r: m.disk_free()),
     "procs":    ("Processes",    "9999",    lambda m, r: str(len(psutil.pids()))),
@@ -262,8 +332,39 @@ SAMPLE_VALUES = {
 }
 # Slots fill the grid two per row; an odd one at the end is centred across the
 # full width, which is why this default has seven. Each usage sits beside its
-# temperature.
+# temperature. "-" marks an empty spot (see stat_rows).
 DEFAULT_SLOTS = "cpu,cputemp,gpu,gputemp,ram%,disk%,net"
+EMPTY_SLOT = "-"
+# The app offers this many spots: three rows of two and one centred.
+MAX_SPOTS = 7
+
+
+def parse_spots(text):
+    """--slots as a list of slot names, with None for each empty spot."""
+    spots = []
+    for name in text.split(","):
+        name = name.strip().lower()
+        if name == EMPTY_SLOT:
+            spots.append(None)
+        elif name:
+            spots.append(name)
+    return spots
+
+
+def stat_rows(spots, columns=2):
+    """Group the spots into screen rows.
+
+    With two columns, spots pair up in order; a row with one empty spot centres
+    the other stat, and a row with both empty is left out, so the screen never
+    shows a hole. With one column, each stat gets a centred row of its own.
+    """
+    size = 2 if columns == 2 else 1
+    rows = []
+    for i in range(0, len(spots), size):
+        row = [name for name in spots[i:i + size] if name]
+        if row:
+            rows.append(row)
+    return rows
 
 
 class Metrics:
@@ -488,28 +589,235 @@ def frost(img, box, blur, darken, corner):
 def compose(frame, items, panels=(), blur=6, darken=0.5, corner=24):
     """Frost each panel box and draw the text over it, the right way up.
 
-    Kept separate from render() so --preview can save what the panel will
-    show without the 180 degree flip making it unreadable.
+    This is what --preview saves: the panel's picture without the 180 degree
+    flip that makes it readable in the case. Each item is
+    (text, font, x, y, anchor, colour).
     """
     img = frame.copy()
     for box in panels:
         frost(img, box, blur, darken, corner)
     draw = ImageDraw.Draw(img)
-    for text, font, x, y, anchor in items:
+    for text, font, x, y, anchor, fill in items:
         # "la" = left edge / "ra" = right edge, both on the ascender line.
-        draw.text((x, y), text, font=font, fill="white",
+        draw.text((x, y), text, font=font, fill=fill,
                   stroke_width=max(2, font.size // 10), stroke_fill="black",
                   anchor=anchor)
     return img
 
 
-def render(frame, items, quality, panels=(), blur=6, darken=0.5, corner=24):
-    """Compose, rotate 180 for the upside-down panel, encode as JPEG."""
-    img = compose(frame, items, panels, blur, darken, corner)
+def text_bands(items, size):
+    """One tick's text, drawn once to be laid over every frame.
+
+    Returns (y, strip) pairs: the rows of the upside-down frame that hold
+    text, each an RGBA strip whose alpha is the text's coverage. Every glyph
+    has a black outline, so laying this over a frame gives the pixels that
+    drawing on the frame itself would -- bar a handful (20 of 472,320 in
+    tests) where the outline and the fill both only partly cover a pixel,
+    which come out a few shades darker. JPEG changes pixels by more.
+    """
+    layer = compose(Image.new("RGBA", size, (0, 0, 0, 0)), items)
+    layer = layer.transpose(Image.ROTATE_180)
+    rows = layer.getchannel("A").getprojection()[1]
+    # Runs of rows with text in them, joined across small gaps.
+    runs, start = [], None
+    for y, inked in enumerate(list(rows) + [0]):
+        if inked and start is None:
+            start = y
+        elif not inked and start is not None:
+            if runs and start - runs[-1][1] < 16:
+                runs[-1] = (runs[-1][0], y)
+            else:
+                runs.append((start, y))
+            start = None
+    return [(y0, layer.crop((0, y0, size[0], y1))) for y0, y1 in runs]
+
+
+def encode_with(frame, size, bands, quality):
+    """Lay the text strips over a prepared frame (see prepare) and encode it
+    as JPEG."""
+    img = unpack(frame, size) if isinstance(frame, bytes) else frame.copy()
+    for y, strip in bands:
+        img.paste(strip, (0, y), strip)
     buf = BytesIO()
-    img.transpose(Image.ROTATE_180).save(
-        buf, format="JPEG", quality=quality, subsampling=0)
+    img.save(buf, format="JPEG", quality=quality, subsampling=0)
     return buf.getvalue()
+
+
+class Layout:
+    """Where everything goes on a w x h frame, and the fonts it is drawn in.
+
+    It also records how large each kind of text could grow (`limits`) and
+    where the two blocks sit as a share of the height they can move through
+    (`clock_pos`, `stats_pos`) -- what the app's sliders show.
+    """
+
+    def __init__(self, args, w, h, rows, labels):
+        self.w, self.h, self.rows, self.labels = w, h, rows, labels
+        self.show_time, self.show_date = not args.no_time, not args.no_date
+        self.colors = {"time": args.time_color, "date": args.date_color,
+                       "label": args.label_color, "value": args.value_color}
+        self.time_fmt = TIME_FORMATS[args.time_format][1 if args.seconds else 0]
+        self.date_fmt = date_strftime(args.date_format)
+        self.limits = {}
+
+        # Screen edge -> inset -> panel edge -> pad -> text.
+        inset, padx, pady = args.frost_inset, args.frost_pad, args.frost_pad_y
+        self.col_left, self.col_right = inset + padx, w - inset - padx
+        avail = max(1, self.col_right - self.col_left)
+        path = self.font_path = resolve_font(args.font)
+
+        # No default size cap: both lines grow until they span --text-fill of
+        # the panel, so the clock and the date come out the same width as each
+        # other and scale together. They are sized against the widest string
+        # each can ever produce -- "12:00 PM" beats "1:05 AM", and a two-digit
+        # day beats a one-digit one -- so neither can outgrow its box at
+        # runtime. --time-size / --date-size size them individually instead,
+        # up to the full width.
+        text_width = max(1, round(avail * args.text_fill))
+
+        def line_font(kind, samples, size):
+            widest = _widest(path, samples)
+            self.limits[kind] = fit_font(path, widest, avail, 2 * avail).size
+            if size:
+                return fit_font(path, widest, avail, size)
+            return fit_font(path, widest, text_width, avail)
+
+        self.time_font = (line_font("time", time_samples(self.time_fmt), args.time_size)
+                          if self.show_time else None)
+        self.date_font = (line_font("date", date_samples(self.date_fmt), args.date_size)
+                          if self.show_date else None)
+
+        # Each column gets half the width, less a gap so they never collide,
+        # but a centred stat gets the lot. The two groups are therefore sized
+        # against different limits and whichever comes out smaller wins.
+        # Sizing against every slot's widest plausible value means a reading
+        # can never outgrow its column once it is running.
+        half = (avail - 10) // 2
+        paired = [name for row in rows if len(row) == 2 for name in row]
+        single = [name for row in rows if len(row) == 1 for name in row]
+
+        def stat_font(kind, text_of, size, default):
+            def sized(start):
+                fonts = [fit_font(path, [text_of(n) for n in names], width, start)
+                         for names, width in ((paired, half), (single, avail)) if names]
+                return min(fonts, key=lambda f: f.size) if fonts else _font(path, start)
+            self.limits[kind] = sized(avail).size
+            return sized(size or default)
+
+        self.label_font = stat_font("label", lambda n: labels[n], args.label_size, w // 20)
+        self.value_font = stat_font("value", lambda n: SLOTS[n][1], args.value_size, w // 11)
+
+        # The clock block: at the top unless --clock-pos moves it.
+        self.clock_box, self.clock_pos = None, 0.0
+        if self.show_time and self.show_date:
+            lines_h = round(self.time_font.size * 1.15) + self.date_font.size
+        else:
+            lines_h = (self.time_font or self.date_font or _font(path, 1)).size
+        if self.show_time or self.show_date:
+            panel_h = lines_h + 2 * pady
+            travel = h - 2 * inset - panel_h
+            top = inset + round(max(0, travel) * (args.clock_pos or 0))
+            self.clock_pos = (top - inset) / travel if travel > 0 else 0.0
+            self.clock_box = (inset, top, w - inset, top + panel_h)
+            self.time_y = top + pady
+            self.date_y = self.time_y + (round(self.time_font.size * 1.15)
+                                         if self.show_time else 0)
+
+        # The stats block.
+        self.label_h = round(self.label_font.size * 1.3)
+        self.value_h = round(self.value_font.size * 1.35)
+        self.block_h = self.label_h + self.value_h + round(self.value_font.size * 0.55)
+        self.stats_box, self.stats_pos, self.overflow = None, 0.0, 0
+        if rows:
+            stats_h = (len(rows) - 1) * self.block_h + self.label_h + self.value_font.size
+            panel_h = stats_h + 2 * pady
+            travel = h - 2 * inset - panel_h
+            if args.stats_pos is not None:
+                y = inset + pady + round(max(0, travel) * args.stats_pos)
+            else:
+                y = args.stats_y or round(h * 0.74)
+                # Keep a tall block on screen: at the default y, six rows would
+                # run off the bottom of the frame and the last reading would be
+                # cut in half.
+                overflow = y + stats_h + pady + inset - h
+                if overflow > 0:
+                    y -= overflow
+            self.stats_y = y
+            top = y - pady
+            self.stats_pos = (min(1.0, max(0.0, (top - inset) / travel))
+                              if travel > 0 else 0.0)
+            # How far a block too tall for the screen runs off it.
+            self.overflow = max(0, -travel)
+            self.stats_box = (inset, top, w - inset, top + panel_h)
+
+        self.panels = [] if args.no_frost else [
+            box for box in (self.clock_box, self.stats_box) if box]
+
+    def clock(self):
+        """The clock and date strings for right now."""
+        now = time.localtime()
+        return (time.strftime(self.time_fmt, now) if self.show_time else "",
+                time.strftime(self.date_fmt, now) if self.show_date else "")
+
+    def items(self, clock, vals):
+        """One tick's worth of (text, font, x, y, anchor, colour) tuples."""
+        w, color = self.w, self.colors
+        items = []
+        # Centred: "ma" is middle horizontally, ascender line vertically.
+        if self.show_time:
+            items.append((clock[0], self.time_font, w // 2, self.time_y, "ma", color["time"]))
+        if self.show_date:
+            items.append((clock[1], self.date_font, w // 2, self.date_y, "ma", color["date"]))
+        values = iter(vals)
+        for n, row in enumerate(self.rows):
+            top = self.stats_y + n * self.block_h
+            below = top + self.label_h
+            if len(row) == 2:
+                # A full row: left column anchored "la", right "ra".
+                left, right = self.labels[row[0]], self.labels[row[1]]
+                items += [
+                    (left, self.label_font, self.col_left, top, "la", color["label"]),
+                    (right, self.label_font, self.col_right, top, "ra", color["label"]),
+                    (next(values), self.value_font, self.col_left, below, "la", color["value"]),
+                    (next(values), self.value_font, self.col_right, below, "ra", color["value"]),
+                ]
+            else:
+                # A stat on its own row, centred across the full width.
+                items += [
+                    (self.labels[row[0]], self.label_font, w // 2, top, "ma", color["label"]),
+                    (next(values), self.value_font, w // 2, below, "ma", color["value"]),
+                ]
+        return items
+
+    def describe(self):
+        """The text sizes, for the log: "clock 48px / date 22px"."""
+        parts = [f"clock {self.time_font.size}px" if self.show_time else "no clock"]
+        if self.show_date:
+            parts.append(f"date {self.date_font.size}px")
+        return " / ".join(parts)
+
+
+def _fraction(text):
+    value = float(text)
+    if not 0 <= value <= 1:
+        raise argparse.ArgumentTypeError(f"{text} is not between 0 and 1")
+    return value
+
+
+def _zoom(text):
+    value = float(text)
+    if not 1 <= value <= MAX_ZOOM:
+        raise argparse.ArgumentTypeError(f"{text} is not between 1 and {MAX_ZOOM:g}")
+    return value
+
+
+def _label(text):
+    slot, equals, label = text.partition("=")
+    slot = slot.strip().lower()
+    if not equals or slot not in SLOTS:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not SLOT=TEXT with a slot from: {', '.join(SLOTS)}")
+    return slot, label
 
 
 def build_parser():
@@ -524,11 +832,28 @@ def build_parser():
                          "Default: scale to --width and keep the shape")
     ap.add_argument("--fit-color", type=ImageColor.getrgb, default="#000000",
                     help="edge colour for --fit color (default #000000)")
+    ap.add_argument("--zoom", type=_zoom, default=1.0,
+                    help=f"with --fit: enlarge the picture, 1 to {MAX_ZOOM:g} (default 1)")
+    ap.add_argument("--pan-x", type=_fraction, default=0.5,
+                    help="with --fit: which part shows when the picture is wider "
+                         "than the screen, from 0 (its left edge) to 1 (its right "
+                         "edge); default 0.5, centred")
+    ap.add_argument("--pan-y", type=_fraction, default=0.5,
+                    help="the same from top (0) to bottom (1)")
     ap.add_argument("--fps", type=float, default=10.0)
     ap.add_argument("--quality", type=int, default=88)
     ap.add_argument("--port", help="COM port (default: located by VID:PID)")
     ap.add_argument("--font", default="consolab.ttf",
                     help="font file in the Windows font directory (default consolab.ttf)")
+    ap.add_argument("--time-format", choices=TIME_FORMATS, default="12h",
+                    help="12h (3:25 PM), 12h-plain (3:25) or 24h (15:25); default 12h")
+    ap.add_argument("--seconds", action="store_true", help="show seconds on the clock")
+    ap.add_argument("--date-format", default=DATE_FORMAT, metavar="PATTERN",
+                    help=f"the date, written with the codes {' '.join(DATE_CODES)}; "
+                         f"[text in brackets] is kept as it is "
+                         f"(default {DATE_FORMAT!r})")
+    ap.add_argument("--no-time", action="store_true", help="no clock line")
+    ap.add_argument("--no-date", action="store_true", help="no date line")
     ap.add_argument("--time-size", type=int, default=0)
     ap.add_argument("--date-size", type=int, default=0)
     ap.add_argument("--text-fill", type=float, default=0.82,
@@ -536,13 +861,29 @@ def build_parser():
                          "0-1 (default 0.82; 1.0 runs right up to the padding)")
     ap.add_argument("--label-size", type=int, default=0)
     ap.add_argument("--value-size", type=int, default=0)
+    for part in ("time", "date", "label", "value"):
+        ap.add_argument(f"--{part}-color", type=ImageColor.getrgb, default="white",
+                        help=f"{part} text colour (default white)")
+    ap.add_argument("--clock-pos", type=_fraction,
+                    help="height of the clock block, from 0 (top, the default) "
+                         "to 1 (bottom)")
+    ap.add_argument("--stats-pos", type=_fraction,
+                    help="height of the stats block, from 0 (top) to 1 (bottom); "
+                         "overrides --stats-y")
     ap.add_argument("--stats-y", type=int, default=0,
                     help="top of the stats block; default sits below the figure")
     ap.add_argument("--no-stats", action="store_true", help="clock and date only")
+    # argparse formats help text with %, so the % in ram% must be doubled.
     ap.add_argument("--slots", default=DEFAULT_SLOTS,
-                    help="comma-separated readings, filling the grid two per "
-                         f"row (default {DEFAULT_SLOTS}). "
-                         f"Available: {', '.join(SLOTS)}")
+                    help=(f"comma-separated readings, filling the grid two per "
+                          f"row; {EMPTY_SLOT} leaves a spot empty (default "
+                          f"{DEFAULT_SLOTS}). Available: {', '.join(SLOTS)}"
+                          ).replace("%", "%%"))
+    ap.add_argument("--columns", type=int, choices=(1, 2), default=2,
+                    help="stats per row (default 2)")
+    ap.add_argument("--label", type=_label, action="append", default=[],
+                    metavar="SLOT=TEXT",
+                    help="rename a stat on screen, e.g. cputemp=CPU; repeatable")
     ap.add_argument("--preview", metavar="FILE",
                     help="save one frame to FILE and exit, without opening the "
                          "panel -- lets you tune layout while it keeps running")
@@ -564,6 +905,72 @@ def build_parser():
     return ap
 
 
+def _frames(args, limit=None, picture=None, each=None):
+    """The picture's frames, sized for the panel.
+
+    `picture` is the source's first frame, already opened; the app's preview
+    passes it so that it need not read the file on every redraw. `each` is
+    applied to each frame as it loads (see lcd_win.load_frames).
+    """
+    if not args.fit and (args.zoom != 1 or args.pan_x != 0.5 or args.pan_y != 0.5):
+        sys.exit("--zoom, --pan-x and --pan-y need --fit")
+    pan = (args.pan_x, args.pan_y)
+    if picture is None:
+        return load_frames(args.source, args.width, args.fit, args.fit_color,
+                           args.zoom, pan, limit, each)
+    if args.fit:
+        return [fit_frame(picture, fit_size(args.width), args.fit, args.fit_color,
+                          args.zoom, pan)]
+    height = round(picture.height * args.width / picture.width)
+    return [picture.resize((args.width, height), Image.LANCZOS)]
+
+
+def _panel_size(args):
+    """The size _frames will make the frames, without decoding any."""
+    if args.fit:
+        return fit_size(args.width)
+    try:
+        with Image.open(args.source) as img:
+            return args.width, round(img.height * args.width / img.width)
+    except OSError as e:
+        sys.exit(f"cannot read {args.source}: {e}\n"
+                 "(images and GIFs only -- video would need ffmpeg)")
+
+
+def _stats_setup(args):
+    """The stat rows (see stat_rows) and the label of every stat."""
+    if args.no_stats:
+        return [], {}
+    spots = parse_spots(args.slots)
+    unknown = [name for name in spots if name and name not in SLOTS]
+    if unknown:
+        sys.exit(f"unknown slot(s) {', '.join(unknown)} -- available: "
+                 f"{', '.join(SLOTS)}")
+    if not spots:
+        sys.exit("--slots needs at least one reading")
+    labels = {name: slot[0] for name, slot in SLOTS.items()}
+    labels.update(args.label)
+    return stat_rows(spots, args.columns), labels
+
+
+def preview(argv, picture=None):
+    """One frame as the panel will show it, with example readings.
+
+    For the app's preview: returns (image, layout), where the layout says how
+    large each text could grow and where the blocks sit. `picture` is the
+    source's first frame, already opened (see _frames). Never reads a sensor
+    or opens the port.
+    """
+    args = build_parser().parse_args(argv)
+    frame = _frames(args, limit=1, picture=picture)[0]
+    rows, labels = _stats_setup(args)
+    layout = Layout(args, frame.width, frame.height, rows, labels)
+    stats = SampleMetrics([name for row in rows for name in row])
+    img = compose(frame, layout.items(layout.clock(), stats.values()), layout.panels,
+                  args.frost_blur, args.frost_dark, args.frost_corner)
+    return img, layout
+
+
 def main(argv=None, stop=None, log=None):
     """Run the clock until stopped.
 
@@ -575,36 +982,23 @@ def main(argv=None, stop=None, log=None):
     log = log or (lambda message: print(message, flush=True))
     args = build_parser().parse_args(argv)
 
-    frames = load_frames(args.source, args.width, args.fit, args.fit_color)
-    w, h = frames[0].size
+    if args.preview:
+        frames = _frames(args, limit=1)
+        w, h = frames[0].size
+    else:
+        w, h = _panel_size(args)
     if w * h > MAX_PIXELS:
         sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
 
-    slots = [s.strip().lower() for s in args.slots.split(",") if s.strip()]
-    unknown = [s for s in slots if s not in SLOTS]
-    if unknown:
-        sys.exit(f"unknown slot(s) {', '.join(unknown)} -- available: "
-                 f"{', '.join(SLOTS)}")
+    rows, labels = _stats_setup(args)
+    layout = Layout(args, w, h, rows, labels)
+    if not args.preview:
+        # Each frame is frosted, flipped and packed as it loads (see prepare).
+        frames = _frames(args, each=lambda frame: prepare(frame, layout.panels, args))
+        if len(frames) == 1:
+            frames = [unpack(frames[0], (w, h))]    # a still picture: nothing to save
+    slots = [name for row in rows for name in row]
     if not slots:
-        sys.exit("--slots needs at least one reading")
-
-    # Screen edge -> inset -> panel edge -> pad -> text.
-    inset, padx, pady = args.frost_inset, args.frost_pad, args.frost_pad_y
-    col_left, col_right = inset + padx, w - inset - padx
-    path = resolve_font(args.font)
-    avail = col_right - col_left
-    # No default size cap: both lines grow until they span --text-fill of the
-    # panel, so the clock and the date come out the same width as each other
-    # and scale together. The samples are the widest each can ever be --
-    # "12:00 PM" beats "1:05 AM", and a two-digit day beats the one-digit day
-    # that %#d can produce, so neither can outgrow its box at runtime.
-    # --time-size / --date-size still cap them individually.
-    text_width = max(1, round(avail * args.text_fill))
-    time_font = fit_font(path, "12:00 PM", text_width, args.time_size or avail)
-    date_font = fit_font(path, "(Wed) 30-Sep-2026", text_width,
-                         args.date_size or avail)
-
-    if args.no_stats:
         stats = None
     elif args.preview and args.sample_stats:
         stats = SampleMetrics(slots)
@@ -613,79 +1007,10 @@ def main(argv=None, stop=None, log=None):
     temps = stats.temps if stats else None
     if temps:
         log(temps.status())
-    # Each column gets half the width, less a gap so they never collide, but a
-    # centred odd slot gets the lot. The two groups are therefore sized
-    # against different limits and whichever comes out smaller wins. Sizing
-    # against every slot's widest plausible value means a reading can never
-    # outgrow its column once it is running.
-    half = (avail - 10) // 2
-    paired = slots[:len(slots) - len(slots) % 2] if stats else []
-    centred = slots[len(paired):] if stats else []
-    smallest = lambda a, b: a if a.size <= b.size else b
-    label_start = args.label_size or w // 20
-    value_start = args.value_size or w // 11
-    label_font = smallest(
-        fit_font(path, [SLOTS[s][0] for s in paired], half, label_start),
-        fit_font(path, [SLOTS[s][0] for s in centred], avail, label_start))
-    value_font = smallest(
-        fit_font(path, [SLOTS[s][1] for s in paired], half, value_start),
-        fit_font(path, [SLOTS[s][1] for s in centred], avail, value_start))
-
-    time_y = inset + pady
-    date_y = time_y + round(time_font.size * 1.15)
-    stats_y = args.stats_y or round(h * 0.74)
-    label_h = round(label_font.size * 1.3)
-    value_h = round(value_font.size * 1.35)
-    block_h = label_h + value_h + round(value_font.size * 0.55)
-
-    if stats:
-        rows = (len(slots) + 1) // 2
-        stats_bottom = stats_y + (rows - 1) * block_h + label_h + value_font.size
-        # Keep a tall block on screen: at the default y, six rows would run off
-        # the bottom of the frame and the last reading would be cut in half.
-        overflow = stats_bottom + pady + inset - h
-        if overflow > 0:
-            stats_y -= overflow
-            stats_bottom -= overflow
-
-    panels = []
-    if not args.no_frost:
-        panels.append((inset, time_y - pady, w - inset, date_y + date_font.size + pady))
-        if stats:
-            panels.append((inset, stats_y - pady, w - inset, stats_bottom + pady))
 
     def tick():
         """The clock strings and stat values for right now."""
-        now = time.localtime()
-        return ((time.strftime(TIME_FMT, now), time.strftime(DATE_FMT, now)),
-                stats.values() if stats else ())
-
-    def build_items(clock, vals):
-        """One tick's worth of (text, font, x, y, anchor) tuples."""
-        # Centred: "ma" is middle horizontally, ascender line vertically.
-        items = [
-            (clock[0], time_font, w // 2, time_y, "ma"),
-            (clock[1], date_font, w // 2, date_y, "ma"),
-        ]
-        if stats:
-            labels = stats.labels()
-            for n in range(0, len(vals), 2):
-                top = stats_y + (n // 2) * block_h
-                if n + 1 < len(vals):
-                    # A full row: left column anchored "la", right "ra".
-                    items += [
-                        (labels[n], label_font, col_left, top, "la"),
-                        (labels[n + 1], label_font, col_right, top, "ra"),
-                        (vals[n], value_font, col_left, top + label_h, "la"),
-                        (vals[n + 1], value_font, col_right, top + label_h, "ra"),
-                    ]
-                else:
-                    # An odd slot at the end, centred across the full width.
-                    items += [
-                        (labels[n], label_font, w // 2, top, "ma"),
-                        (vals[n], value_font, w // 2, top + label_h, "ma"),
-                    ]
-        return items
+        return layout.clock(), stats.values() if stats else ()
 
     if args.preview:
         try:
@@ -697,15 +1022,14 @@ def main(argv=None, stop=None, log=None):
                 time.sleep(0.6)
                 stats.refresh()
             clock, vals = tick()
-            compose(frames[0], build_items(clock, vals), panels, args.frost_blur,
-                    args.frost_dark, args.frost_corner).save(args.preview)
+            compose(frames[0], layout.items(clock, vals), layout.panels,
+                    args.frost_blur, args.frost_dark, args.frost_corner).save(args.preview)
         finally:
             if temps:
                 temps.close()
         following = (f", following {stats.nic()}" if stats
                      and any(s.startswith("net") for s in slots) else "")
-        log(f"preview written to {args.preview} ({w}x{h}), "
-            f"clock {time_font.size}px / date {date_font.size}px"
+        log(f"preview written to {args.preview} ({w}x{h}), {layout.describe()}"
             f"{following} -- panel untouched")
         return
 
@@ -722,40 +1046,65 @@ def main(argv=None, stop=None, log=None):
         atexit.register(panel.close)
         install_handlers()
     log(f"{len(frames)} frames at {w}x{h} ({w * h:,} px), {args.fps:g} FPS, "
-        f"on {panel.port}, font {os.path.basename(path)}, "
-        f"clock {time_font.size}px"
+        f"on {panel.port}, font {os.path.basename(layout.font_path)}, "
+        f"{layout.describe()}"
         + ("" if stats is None else
-           f", slots {'/'.join(slots)} at y={stats_y} "
-           f"(labels {label_font.size}px, values {value_font.size}px)"))
+           f", slots {'/'.join(slots)} at y={layout.stats_y} "
+           f"(labels {layout.label_font.size}px, values {layout.value_font.size}px)"))
     try:
-        _stream(panel, header, frames, tick, build_items, panels, args, stop)
+        _stream(panel, header, frames, (w, h), tick, layout.items, args, stop)
     finally:
         panel.close()
         if temps:
             temps.close()
 
 
-def _stream(panel, header, frames, tick, build_items, panels, args, stop):
-    """Send frames forever, or until `stop` is set."""
-    # Re-rendering every frame each tick is wasteful, so cache per frame and
-    # only redraw when the displayed text actually changes.
+def prepare(frame, panels, args):
+    """One frame made ready for the loop, once: frosted, turned upside down
+    and packed.
+
+    Neither the frost nor the flip depends on the text, so doing them here
+    rather than on every redraw roughly halves the loop's CPU time.
+
+    Packing is zlib, which is lossless: the rooftop GIF's 59 frames take 80 MB
+    as they are and under 9 MB packed (a 300-frame GIF, over 400 MB), for
+    about 2.5 ms of unpacking per frame sent.
+    """
+    img = compose(frame, [], panels, args.frost_blur, args.frost_dark,
+                  args.frost_corner).transpose(Image.ROTATE_180)
+    return zlib.compress(img.tobytes(), 1)
+
+
+def unpack(data, size):
+    return Image.frombytes("RGB", size, zlib.decompress(data))
+
+
+def _stream(panel, header, frames, size, tick, build_items, args, stop):
+    """Send prepared frames forever, or until `stop` is set.
+
+    This runs all day, so it does as little as it can: the text is drawn once
+    each time it changes (text_bands) rather than onto every frame, and each
+    frame's JPEG is kept until the text changes. JPEGs made for older text
+    can never be sent again, so they are dropped at once rather than held --
+    with stats changing every 2 seconds, a long GIF would otherwise keep a
+    JPEG of every frame for nothing.
+    """
     cache = {}
+    shown, bands = None, []
     period = 1.0 / args.fps
     i = 0
     while stop is None or not stop.is_set():
         start = time.time()
         clock, vals = tick()
         stamp = clock + vals
+        if stamp != shown:
+            shown, bands = stamp, text_bands(build_items(clock, vals), size)
+            cache.clear()
 
         idx = i % len(frames)
-        cached = cache.get(idx)
-        if cached is None or cached[0] != stamp:
-            payload = header + render(frames[idx], build_items(clock, vals),
-                                      args.quality, panels, args.frost_blur,
-                                      args.frost_dark, args.frost_corner)
-            cache[idx] = (stamp, payload)
-        else:
-            payload = cached[1]
+        payload = cache.get(idx)
+        if payload is None:
+            payload = cache[idx] = header + encode_with(frames[idx], size, bands, args.quality)
         panel.send(payload)
         i += 1
         wait = max(0, period - (time.time() - start))
