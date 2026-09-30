@@ -346,6 +346,24 @@ settings into exactly these options (`settings_win.engine_argv`):
 | `--clock-pos 0–1`, `--stats-pos 0–1` | Height of the clock block and the stats block, from top (0) to bottom (1) |
 | `--slots`, `--columns 1\|2`, `--label SLOT=TEXT` | The stats, their layout and their names — see [Stats slots](#stats-slots) |
 | `--font`, `--no-frost`, `--frost-dark 0–1`, `--frost-blur` | Font file, and the frosted panel behind the text |
+| `--brightness 10–100` | Dim the whole screen to this percentage (see below) |
+| `--calendar month\|week`, `--week-start mon\|sun`, `--calendar-size`, `--calendar-color` | A calendar in the clock block, under the date (or in its place with `--no-date`); today is marked |
+| `--note-line TEXT` (repeatable) | Your own text, one option per line; long lines wrap |
+| `--countdown-date YYYY-MM-DD[THH:MM]`, `--countdown-mode to\|to-hours\|since`, `--countdown-label` | A countdown to (or count-up from) a date — see [The extra blocks](#the-extra-blocks) |
+| `--todo-title`, `--todo-item "[x] TEXT"` (repeatable) | A to-do list; items starting `[x] ` are done (ticked, crossed out and dimmed) |
+| `--note-…`, `--countdown-…`, `--todo-…` `-size`, `-color`, `-align left\|center\|right`, `-pos 0–1`, `-no-frost` | Each extra block's size, colour, alignment, height and panel |
+
+**Brightness is done in software.** The panel's backlight has no known
+control: the vendor app's panel class has no brightness command (see
+[What the vendor app revealed](#what-the-vendor-app-revealed)) and the device
+has no other interface. So `--brightness` scales every pixel's colour
+(`clock_win.dim`); the backlight stays at full, so it saves no power and black
+stays the same black, but the screen looks dimmer. Tested on the panel at
+100/70/40/15% on 2026-09-30: every level showed cleanly. It costs nothing per
+frame: frames are dimmed once when they load (`prepare`) and the text once per
+change (`text_bands`). Don't look for a hardware brightness by sending the
+panel guessed commands — an unknown command could leave its firmware in a bad
+state.
 
 **Date codes.** Everything else in the pattern is printed as written; put text
 in `[square brackets]` to keep a letter such as the D in `[Today]` from turning
@@ -393,6 +411,38 @@ full width. How big that can be depends on the format:
 | `Wednesday, 30 September 2026` | 17px |
 
 The app's size sliders stop at exactly these limits (`Layout.limits`).
+
+### The extra blocks
+
+Besides the clock block and the stats, three blocks can be switched on: your
+own **text**, a **countdown** and a **to-do list**. The clock block can also
+hold a **calendar** (this month, or just this week) under the date or instead
+of it.
+
+- **Placement.** Unless given a `-pos`, they stack under the clock block in
+  that order, 12 px apart (`BLOCK_GAP`); a block that is moved takes the
+  unmoved ones after it along. Each has its own frosted panel, which can be
+  switched off.
+- **They cost nothing while running.** They only change at known moments, so
+  they are drawn into the frames once, when the frames are prepared
+  (`Layout.static`, `prepare`), not on every frame like the clock and the
+  stats. Measured: a 6-line to-do list drawn this way made no measurable
+  difference to CPU use and added about 1 MB and 0.4 s to preparing the
+  frames; redrawing it with the stats every 2 seconds would have cost about
+  0.3% of a core.
+- **When they change.** The calendar and a countdown in days change at
+  midnight; a countdown in days and hours changes when the hours figure drops.
+  The layout records that moment (`valid_until`); when it comes, the player
+  builds the frames afresh in the background and swaps them in, so the new day
+  appears within a couple of seconds, without a pause.
+
+The countdown reads *12 days to Launch*, then *Launch is today!* on the day,
+and disappears after it (`to`); *12 days 5 h to Launch* (`to-hours`, to a date
+and time); or *214 days since I quit* (`since`, shown from the date on).
+Without a name: *12 days to go*, *Today!*, *214 days*.
+
+The to-do list draws its boxes and ticks as shapes rather than characters, so
+they look the same in any font. Ticked items are crossed out and dimmed.
 
 ### Tuning the layout without stopping the panel
 
@@ -641,8 +691,19 @@ file, with only the picture and fit, loads with defaults for the rest.
 |---|---|
 | `apply` | Stores the look, and optionally a new picture (sent as bytes) or `"default"`, then restarts the display. The window's one **Apply** button sends everything in this one message |
 | `save_layout`, `load_layout`, `delete_layout` | A **saved layout** is `layouts\<n>.json` (n = 1–10) with the look, plus `<n>.<ext>`, its own copy of its picture. Saving takes what is on the screen, so the window applies unsaved changes first |
+| `todo` | Ticks, unticks or removes one to-do item (found by its `id`), or removes every ticked one — straight from the window, without the rest of the form. New and edited items go with `apply` |
 | `set_autostart` | Switches the service between automatic and manual start |
 | `status` | What the display is doing, for the window's status line |
+
+**Changing settings never pauses the screen.** Preparing the frames for a new
+look takes a second or two for a GIF. Up to v1.1.0 the display stopped
+meanwhile, so the screen froze on its last frame. Now the service builds the
+new look (`clock_win.Show`) in the background while the old one keeps playing,
+then hands it to the player (`Player.swap`): measured, the longest gap between
+frames during a swap was about 140 ms against the usual 100–110 ms. The same
+swap redraws the calendar and countdown at midnight (see
+[The extra blocks](#the-extra-blocks)). The service keeps one
+LibreHardwareMonitor open across swaps rather than reopening it each time.
 
 The window reads `config.json` and the layout list straight from the folder
 (users may read it), so it shows the settings even while the service is
@@ -838,6 +899,23 @@ v1.0.0 drew its preview at login even while hidden; v1.1.0 draws nothing until
 the window opens. The window itself takes more memory while open (more
 controls, and the picture its preview is made from), and lets go of the
 picture when hidden.
+
+**v1.2.0** (same machine and method, 2026-09-30) adds brightness, the text,
+countdown and to-do blocks and the calendar, and swaps settings without a
+pause — at no measurable cost:
+
+| | CPU | RAM |
+|---|---|---|
+| Display, v1.1.0 | 4.6% of one core | 79 MB |
+| Display, v1.2.0, nothing new switched on | 4.2% | 79 MB |
+| Display, v1.2.0, **everything on** (text, countdown, to-do list, month calendar, 80% brightness) | 4.1% | 83 MB |
+| Window app hidden, v1.1.0 / v1.2.0 | 0.0% / 0.0% | 39 / 40 MB |
+| Window app open and idle, v1.1.0 / v1.2.0 | 0.0% / 0.0% | 56 / 57 MB |
+
+Runs vary by about ±0.4% of a core, so the three display rows are the same
+within noise: the new blocks are drawn into the frames when they are
+prepared, never per frame. With everything on, preparing the frames takes
+0.5 s longer (2.8 s) and 9 MB more at its peak, once per Apply and at midnight.
 
 ### Where the display's time goes
 

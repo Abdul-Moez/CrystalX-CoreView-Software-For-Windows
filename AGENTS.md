@@ -26,6 +26,10 @@ too.
   rooftop GIF, and don't re-run the width experiment — it has been done.
 - The vendor app (LCD Control) is obfuscated; its code and strings cannot be
   read statically. Don't spend time trying.
+- **Never send the panel guessed or experimental commands** (anything but
+  header + JPEG frames). Its firmware protocol is unknown, and an unexpected
+  command could leave it in a bad state. Brightness is done in software
+  (`--brightness`) for this reason.
 - **Temperatures** come from LibreHardwareMonitor via `temps_win.py`. CPU needs
   PawnIO **running** and admin rights; GPU (AMD) needs neither. An unreadable
   sensor reports 0, not None. Never switch to a WinRing0-based build. See
@@ -61,6 +65,10 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
   One Apply / Undo covers every tab.
 - **Uninstall never deletes saved layouts without asking** (the user asked for
   this). No is the default; a silent uninstall keeps them.
+- **Reset to defaults keeps what the user wrote** (`CONTENT_KEYS` in
+  `tray_win.py`: the text, the countdown, the to-do list) as well as the
+  picture. To-do ticks and removals reach the screen at once through the
+  service's `todo` command; adding and editing items waits for Apply.
 - **Releases:** the version lives only in `VERSION` in `ipc_win.py`. Bump it,
   commit, then the user tags `vX.Y.Z` and pushes the tag; the workflow checks
   they match. Never change the installer's `AppId`. When updating PawnIO or
@@ -77,6 +85,15 @@ the user asked for both to be as light as possible. See "Performance" in
   the 180° flip and packing happen once per frame at load (`prepare`); the text
   is drawn once per change (`text_bands`), not once per frame. Don't move work
   back into the loop.
+- **Content that changes at a known moment is drawn into the frames**, not
+  per frame: the text, countdown and to-do blocks and the calendar go in
+  `Layout.static`, and `Layout.valid_until` says when they go out of date
+  (midnight, or the countdown's next hour); the player then rebuilds the Show
+  in the background. Only the clock, the date and the stats are drawn as the
+  loop runs.
+- **Never stop the loop to change settings.** Build a new `clock_win.Show`
+  while the old one plays and hand it over with `Player.swap` (the service's
+  `Display._rebuild`). Stopping the loop froze the screen for ~2 s in v1.1.0.
 - Animated pictures are held zlib-packed and made one frame at a time
   (`load_frames(..., each=...)`), so a 300-frame GIF never sits in memory at
   full size. Keep it that way.
@@ -119,6 +136,12 @@ the user asked for both to be as light as possible. See "Performance" in
   owns `\\.\pipe\CrystalXLCD`; a test copy cannot create it, so the test's
   requests silently reach the real service and change the user's settings.
   This happened once.
+- **A test copy of the window appears on the user's screen.** For
+  measurements, put it off-screen (`root.geometry("+-6000+-6000")`) before
+  showing it. When a test must be on screen (screenshots), tell the user first
+  that a test window will pop up and close by itself. Once, a test window
+  popped up unannounced; the user didn't know what it was, clicked it, and
+  spoiled the measurement.
 - Windows reads a `.cmd` file line by line while it runs. Don't edit
   `run-clock.cmd` or `run-gif.cmd` while a copy of it is running.
 - Measure before optimising, and check what a measurement actually means —

@@ -264,23 +264,29 @@ def set_start_type(automatic):
 
 
 class Display:
-    """Runs clock_win in a thread, restarting it on settings changes and
-    retrying while the panel is busy or unplugged."""
+    """Plays the settings on the panel, from a thread, until the service stops.
+
+    A change of settings never pauses the screen: the new look is built
+    (clock_win.Show) in the background while the old one keeps playing, then
+    swapped in (Player.swap). The same happens by itself at midnight, when the
+    calendar or a countdown needs redrawing. While the panel is busy or
+    unplugged, it retries every few seconds.
+    """
 
     def __init__(self, stopping):
         self.stopping = stopping            # the whole service is stopping
-        self.restart = threading.Event()    # ends the current clock run
+        self.retry = threading.Event()      # try again now, rather than wait
+        self.player = None
         self.state, self.detail, self.temps = "starting", "", ""
+        self._temps = None                  # one Temperatures, shared by every Show
+        self._rebuild_lock = threading.Lock()
         self.thread = threading.Thread(target=self._run, name="display", daemon=True)
 
     def start(self):
         self.thread.start()
 
-    def reload(self):
-        self.restart.set()
-
     def stop(self):
-        self.restart.set()
+        self.retry.set()
         self.thread.join(15)
 
     def _log(self, message):
@@ -290,13 +296,54 @@ class Display:
         elif " frames at " in message:
             self.state, self.detail = "showing", message.split(" on ", 1)[-1].split(",")[0]
 
+    def _get_temps(self):
+        if self._temps is None:
+            from temps_win import Temperatures
+            self._temps = Temperatures()
+        return self._temps
+
+    def _show(self):
+        args = clock_win.build_parser().parse_args(clock_argv(load_config()))
+        return clock_win.Show(args, self._log, self._get_temps)
+
+    def reload(self):
+        """New settings (or the midnight refresh): build them in the
+        background and swap them in when ready."""
+        threading.Thread(target=self._rebuild, name="rebuild", daemon=True).start()
+
+    def _rebuild(self):
+        with self._rebuild_lock:            # one at a time; the last one wins
+            player = self.player
+            if player is None:
+                self.retry.set()            # not playing: the next try uses them
+                return
+            try:
+                show = self._show()
+            except SystemExit as e:
+                log.warning("the new settings can't be shown, keeping the old: %s", e.code)
+                return
+            except Exception:
+                log.exception("the new settings can't be shown, keeping the old")
+                return
+            if self.player is player and not self.stopping.is_set():
+                player.swap(show)
+                log.info("now showing the new settings")
+            else:
+                show.close()
+
     def _run(self):
         while not self.stopping.is_set():
-            self.restart.clear()
+            self.retry.clear()
             self.state, self.detail = "starting", ""
+            show = panel = None
             try:
-                clock_win.main(clock_argv(load_config()), stop=self.restart, log=self._log)
-                continue            # stopped or restarted on purpose
+                show = self._show()
+                panel = clock_win.Panel()
+                self._log(show.describe(panel.port))
+                self.player = clock_win.Player(panel, show, on_stale=self.reload)
+                self.player.run(self.stopping)
+                show = self.player.show     # the one playing when it stopped
+                continue
             except SystemExit as e:
                 # The engine's own error messages: panel missing, port busy,
                 # unreadable picture. All of these can clear up by themselves.
@@ -305,7 +352,19 @@ class Display:
             except Exception as e:
                 self.state, self.detail = "waiting", f"{type(e).__name__}: {e}"
                 log.exception("clock stopped with an error")
-            self.restart.wait(RETRY_SECONDS)
+            finally:
+                if self.player is not None:
+                    show = self.player.show
+                    if self.player._next is not None:   # swapped in too late
+                        self.player._next.close()
+                    self.player = None
+                if panel is not None:
+                    panel.close()
+                if show is not None:
+                    show.close()
+            self.retry.wait(RETRY_SECONDS)
+        if self._temps is not None:
+            self._temps.close()
 
 
 class PipeServer:
@@ -460,6 +519,25 @@ class CrystalLcdService(win32serviceutil.ServiceFramework):
             delete_layout(req.get("name"))
             log.info("layout deleted: %s", req.get("name"))
             return self._status()
+        if cmd == "todo":
+            # A tick, untick or removal from the window: straight to the
+            # screen, without the rest of the form. Items are found by id.
+            config = load_config()
+            items, action = config["todo_items"], req.get("action")
+            if action == "remove_done":
+                items = [item for item in items if not item["done"]]
+            else:
+                item = next((i for i in items if i["id"] == req.get("id")), None)
+                if item is None:
+                    raise ValueError("that to-do item is no longer there")
+                if action in ("tick", "untick"):
+                    item["done"] = action == "tick"
+                elif action == "remove":
+                    items.remove(item)
+                else:
+                    raise ValueError(f"unknown to-do action {action!r}")
+            config["todo_items"] = items
+            return self._saved(config, f"to-do list: {action}")
         if cmd == "set_autostart":
             set_start_type(bool(req.get("on")))
             log.info("start with Windows: %s", bool(req.get("on")))

@@ -36,10 +36,12 @@ clean_look(): the service runs as SYSTEM, so nothing unchecked may reach it.
 """
 
 import copy
+import datetime
 import json
 import os
 
-from clock_win import DATE_FORMAT, DEFAULT_SLOTS, EMPTY_SLOT, MAX_SPOTS, SLOTS, TIME_FORMATS
+from clock_win import (ALIGN, COUNTDOWN_MODES, DATE_FORMAT, DEFAULT_SLOTS, EMPTY_SLOT,
+                       MAX_SPOTS, SLOTS, TIME_FORMATS)
 from ipc_win import CONFIG_FILE, DATA_DIR, DEFAULT_PICTURE, app_dir
 from lcd_win import FIT_MODES, MAX_ZOOM
 
@@ -54,6 +56,11 @@ MAX_LABEL = 24                  # characters in a renamed stat
 MAX_DATE_PATTERN = 40
 MAX_LAYOUTS = 10
 MAX_LAYOUT_NAME = 40
+MAX_NOTE = 600                  # characters in the text block
+MAX_NOTE_LINES = 16
+MAX_COUNTDOWN_LABEL = 40
+MAX_TODO_ITEMS = 20
+MAX_TODO_TEXT = 100
 LAYOUTS_DIR = os.path.join(DATA_DIR, "layouts")
 
 DEFAULT_LOOK = {
@@ -72,9 +79,26 @@ DEFAULT_LOOK = {
     "label_size": None, "label_color": "#ffffff",
     "value_size": None, "value_color": "#ffffff",
     "stats_pos": None,
-    # Style. A font of None is DEFAULT_FONT.
+    # Style. A font of None is DEFAULT_FONT. Brightness dims the pixels in
+    # percent; the panel's backlight itself cannot be controlled.
     "font": None, "frost": True, "frost_dark": 0.5, "frost_blur": 9.0,
+    "brightness": 100,
+    # The calendar, in the clock block: None, "month" or "week".
+    "calendar": None, "week_start": "mon", "calendar_size": None,
+    "calendar_color": "#ffffff",
+    # The extra blocks. Each is off until switched on, and keeps its content
+    # while off. A to-do item is {"id", "text", "done"}; ids let a tick from
+    # the window reach the right item.
+    "show_note": False, "note_text": "",
+    "show_countdown": False, "countdown_mode": "to", "countdown_date": "",
+    "countdown_time": "", "countdown_label": "",
+    "show_todo": False, "todo_title": "", "todo_items": [],
 }
+EXTRA_BLOCKS = ("note", "countdown", "todo")
+for _block, _align in zip(EXTRA_BLOCKS, ("center", "center", "left")):
+    DEFAULT_LOOK.update({f"{_block}_size": None, f"{_block}_color": "#ffffff",
+                         f"{_block}_align": _align, f"{_block}_pos": None,
+                         f"{_block}_frost": True})
 DEFAULT_CONFIG = {"picture": None, "picture_label": None, **DEFAULT_LOOK}
 
 
@@ -131,9 +155,11 @@ def clean_look(raw):
     for key in ("pan_x", "pan_y", "frost_dark"):
         take(key, _number(raw.get(key), 0.0, 1.0))
     take("frost_blur", _number(raw.get("frost_blur"), 0.0, 30.0))
-    for key in ("fit_color", "time_color", "date_color", "label_color", "value_color"):
+    for key in ("fit_color", "time_color", "date_color", "label_color", "value_color",
+                "calendar_color", *(f"{b}_color" for b in EXTRA_BLOCKS)):
         take(key, _color(raw.get(key)))
-    for key in ("show_time", "show_date", "show_stats", "seconds", "frost"):
+    for key in ("show_time", "show_date", "show_stats", "seconds", "frost",
+                *(f"show_{b}" for b in EXTRA_BLOCKS), *(f"{b}_frost" for b in EXTRA_BLOCKS)):
         if isinstance(raw.get(key), bool):
             look[key] = raw[key]
     if raw.get("time_format") in TIME_FORMATS:
@@ -141,14 +167,18 @@ def clean_look(raw):
     take("date_format", _text(raw.get("date_format"), MAX_DATE_PATTERN))
     if raw.get("columns") in (1, 2):
         look["columns"] = raw["columns"]
+    brightness = raw.get("brightness")
+    if _int(brightness) and 10 <= brightness <= 100:
+        look["brightness"] = brightness
     # Optional values: an explicit None switches back to automatic.
-    for key in ("time_size", "date_size", "label_size", "value_size"):
+    for key in ("time_size", "date_size", "label_size", "value_size", "calendar_size",
+                *(f"{b}_size" for b in EXTRA_BLOCKS)):
         value = raw.get(key)
         if key in raw and (value is None or (
                 isinstance(value, int) and not isinstance(value, bool)
                 and SIZE_RANGE[0] <= value <= SIZE_RANGE[1])):
             look[key] = value
-    for key in ("clock_pos", "stats_pos"):
+    for key in ("clock_pos", "stats_pos", *(f"{b}_pos" for b in EXTRA_BLOCKS)):
         if key in raw and raw[key] is None:
             look[key] = None
         else:
@@ -165,7 +195,72 @@ def clean_look(raw):
                           and text.strip()}
     if valid_font(raw.get("font")):
         look["font"] = raw["font"]
+    _clean_extras(raw, look)
     return look
+
+
+def _int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _clean_extras(raw, look):
+    """The calendar and the text, countdown and to-do blocks (see clean_look)."""
+    if "calendar" in raw and raw["calendar"] in (None, "month", "week"):
+        look["calendar"] = raw["calendar"]
+    if raw.get("week_start") in ("mon", "sun"):
+        look["week_start"] = raw["week_start"]
+    for block in EXTRA_BLOCKS:
+        if raw.get(f"{block}_align") in ALIGN:
+            look[f"{block}_align"] = raw[f"{block}_align"]
+    note = raw.get("note_text")
+    if (isinstance(note, str) and len(note) <= MAX_NOTE
+            and note.count("\n") < MAX_NOTE_LINES
+            and all(line.isprintable() for line in note.split("\n"))):
+        look["note_text"] = note
+    if raw.get("countdown_mode") in COUNTDOWN_MODES:
+        look["countdown_mode"] = raw["countdown_mode"]
+    if _date(raw.get("countdown_date"), "%Y-%m-%d"):
+        look["countdown_date"] = raw["countdown_date"]
+    if raw.get("countdown_time") == "" or _date(raw.get("countdown_time"), "%H:%M"):
+        look["countdown_time"] = raw["countdown_time"]
+    label = raw.get("countdown_label")
+    if label == "" or _text(label, MAX_COUNTDOWN_LABEL):
+        look["countdown_label"] = label
+    title = raw.get("todo_title")
+    if title == "" or _text(title, MAX_TODO_TEXT):
+        look["todo_title"] = title
+    items = raw.get("todo_items")
+    if isinstance(items, list):
+        look["todo_items"] = _clean_todo(items)
+
+
+def _date(value, fmt):
+    try:
+        return isinstance(value, str) and bool(datetime.datetime.strptime(value, fmt))
+    except ValueError:
+        return False
+
+
+def _clean_todo(items):
+    """Valid to-do items, each with a unique id (new ones numbered on)."""
+    clean, seen = [], set()
+    for item in items[:MAX_TODO_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not (_text(text, MAX_TODO_TEXT) and text.strip()):
+            continue
+        ident = item.get("id")
+        if not _int(ident) or not 0 < ident < 2**31 or ident in seen:
+            ident = None
+        clean.append({"id": ident, "text": text.strip(), "done": item.get("done") is True})
+        if ident:
+            seen.add(ident)
+    next_id = max(seen, default=0) + 1
+    for item in clean:
+        if item["id"] is None:
+            item["id"], next_id = next_id, next_id + 1
+    return clean
 
 
 def split_config(raw):
@@ -221,7 +316,8 @@ def engine_argv(look, picture):
             f"--pan-y={look['pan_y']}",
             f"--time-format={look['time_format']}",
             f"--date-format={look['date_format']}",
-            f"--frost-dark={look['frost_dark']}", f"--frost-blur={look['frost_blur']}"]
+            f"--frost-dark={look['frost_dark']}", f"--frost-blur={look['frost_blur']}",
+            f"--brightness={look['brightness']}"]
     if look["seconds"]:
         argv.append("--seconds")
     if not look["show_time"]:
@@ -239,12 +335,52 @@ def engine_argv(look, picture):
     for block in ("clock", "stats"):
         if look[block + "_pos"] is not None:
             argv.append(f"--{block}-pos={look[block + '_pos']}")
+    argv += _extras_argv(look)
     if look["show_stats"] and any(look["slots"]):
         argv += [f"--slots={','.join(s or EMPTY_SLOT for s in look['slots'])}",
                  f"--columns={look['columns']}"]
         argv += [f"--label={slot}={text}" for slot, text in sorted(look["labels"].items())]
     else:
         argv.append("--no-stats")
+    return argv
+
+
+def _extras_argv(look):
+    """engine_argv's part for the calendar and the extra blocks."""
+    argv = []
+    if look["calendar"]:
+        argv += [f"--calendar={look['calendar']}", f"--week-start={look['week_start']}",
+                 f"--calendar-color={look['calendar_color']}"]
+        if look["calendar_size"]:
+            argv.append(f"--calendar-size={look['calendar_size']}")
+    shown = {
+        "note": look["show_note"] and look["note_text"].strip(),
+        "countdown": look["show_countdown"] and look["countdown_date"],
+        "todo": look["show_todo"] and (look["todo_items"] or look["todo_title"]),
+    }
+    if shown["note"]:
+        argv += [f"--note-line={line}" for line in look["note_text"].split("\n")]
+    if shown["countdown"]:
+        when = look["countdown_date"]
+        if look["countdown_mode"] == "to-hours" and look["countdown_time"]:
+            when += "T" + look["countdown_time"]
+        argv += [f"--countdown-date={when}", f"--countdown-mode={look['countdown_mode']}",
+                 f"--countdown-label={look['countdown_label']}"]
+    if shown["todo"]:
+        argv.append(f"--todo-title={look['todo_title']}")
+        argv += [f"--todo-item={'[x]' if item['done'] else '[ ]'} {item['text']}"
+                 for item in look["todo_items"]]
+    for block in EXTRA_BLOCKS:
+        if not shown[block]:
+            continue
+        argv += [f"--{block}-color={look[block + '_color']}",
+                 f"--{block}-align={look[block + '_align']}"]
+        if look[block + "_size"]:
+            argv.append(f"--{block}-size={look[block + '_size']}")
+        if look[block + "_pos"] is not None:
+            argv.append(f"--{block}-pos={look[block + '_pos']}")
+        if not look[block + "_frost"]:
+            argv.append(f"--{block}-no-frost")
     return argv
 
 

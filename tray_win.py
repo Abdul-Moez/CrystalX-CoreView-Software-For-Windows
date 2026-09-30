@@ -66,14 +66,16 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import clock_win
 import ipc_win
-from clock_win import MAX_SPOTS, SLOTS, date_strftime
+from clock_win import MAX_SPOTS, SLOTS, countdown_text, date_strftime
 from ipc_win import (DEFAULT_PICTURE, DISPLAY_NAME, LOG_FILE, MAX_FRAMES,
                      MAX_PICTURE_BYTES, SERVICE_NAME, VERSION, app_dir)
 from lcd_win import FIT_SIZE, MAX_ZOOM, fit_geometry
-from settings_win import (DEFAULT_FONT, DEFAULT_LOOK, FONT_TYPES, FONTS_DIR,
-                          MAX_DATE_PATTERN, MAX_LABEL, MAX_LAYOUT_NAME,
-                          MAX_LAYOUTS, clean_look, engine_argv, list_layouts,
-                          load_config, picture_path)
+from settings_win import (DEFAULT_FONT, DEFAULT_LOOK, EXTRA_BLOCKS, FONT_TYPES,
+                          FONTS_DIR, MAX_COUNTDOWN_LABEL, MAX_DATE_PATTERN,
+                          MAX_LABEL, MAX_LAYOUT_NAME, MAX_LAYOUTS, MAX_NOTE,
+                          MAX_NOTE_LINES, MAX_TODO_ITEMS, MAX_TODO_TEXT,
+                          clean_look, engine_argv, list_layouts, load_config,
+                          picture_path)
 
 AUTHOR = "Abdul Moez"
 GITHUB = "https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows"
@@ -90,7 +92,7 @@ PREVIEW_SCALE = 0.45
 PREVIEW_SOURCE_LIMIT = 2048
 WRAP = 300                      # width of wrapped text on the right, in px
 PREVIEW_HINT = "Drag to move - scroll to zoom"
-OVERLAP_HINT = "Clock and stats overlap"
+OVERLAP_HINT = "Some blocks overlap"
 
 TIME_CHOICES = [("12h", "12-hour  (3:25 PM)"),
                 ("12h-plain", "12-hour, no AM/PM  (3:25)"),
@@ -115,6 +117,15 @@ STAT_CHOICES = [
     ("procs", "Processes"), ("uptime", "Uptime"),
 ]
 STAT_KEYS = [key for key, _ in STAT_CHOICES]
+COUNTDOWN_CHOICES = [("to", "Days to a date"), ("to-hours", "Days and hours to a date"),
+                     ("since", "Days since a date")]
+# What the free-space readout calls each block.
+BLOCK_NAMES = {"clock": "clock", "stats": "stats", "note": "text",
+               "countdown": "countdown", "todo": "to-do list"}
+BOX, TICKED = "\u2610", "\u2611"            # the to-do list's boxes in the window
+# What the user wrote, which Reset to defaults keeps.
+CONTENT_KEYS = ("note_text", "countdown_mode", "countdown_date", "countdown_time",
+                "countdown_label", "todo_title", "todo_items")
 
 ID_SHOW, ID_QUIT = 1001, 1002
 WM_TRAY = win32con.WM_USER + 20
@@ -451,7 +462,7 @@ def _enable(widgets, on):
     for widget in widgets:
         if isinstance(widget, Slider):
             widget.enable(on)
-        elif isinstance(widget, tk.Button):
+        elif isinstance(widget, (tk.Button, tk.Text)):
             widget.configure(state="normal" if on else "disabled")
         elif isinstance(widget, ttk.Combobox):
             widget.state(["!disabled", "readonly"] if on else ["disabled"])
@@ -649,6 +660,9 @@ class MainWindow:
         self._drag = None
         self._custom_date = False           # "Custom pattern" chosen for the date
         self._controls_key = None           # what _update_controls last acted on
+        self._saved_look = clean_look({})   # what the screen shows (for Undo)
+        self._todo_shown = None             # the to-do items in the list box
+        self._editing = None                # the id of the to-do item being edited
         self._status_key = None             # what refresh last showed
         self.visible = False
         self.fonts = FontCatalog()
@@ -724,10 +738,11 @@ class MainWindow:
         self.tabs.pack(fill="both", expand=True, pady=(12, 0))
         # Read the font list once the Style tab is opened, ready for the picker.
         self.tabs.bind("<<NotebookTabChanged>>", lambda e: self.fonts.start()
-                       if self.tabs.index("current") == 3 else None)
+                       if self.tabs.tab("current", "text").strip() == "Style" else None)
         self._build_picture_tab()
         self._build_clock_tab()
         self._build_stats_tab()
+        self._build_extras_tab()
         self._build_style_tab()
         self._build_options_tab()
 
@@ -912,8 +927,18 @@ class MainWindow:
 
     def _build_style_tab(self):
         tab = self._tab("Style")
-        frame = ttk.LabelFrame(tab, text=" Font ", padding=10)
+        frame = ttk.LabelFrame(tab, text=" Brightness ", padding=10)
         frame.pack(fill="x")
+        self.brightness = Slider(frame, 10, 100, lambda v: f"{round(v)}%",
+                                 lambda v: self._set("brightness", round(v)), length=200)
+        self.brightness.pack(anchor="w")
+        ttk.Label(frame, text="Dims the whole screen. The case screen's backlight "
+                              "can't be changed by software, so this darkens the "
+                              "picture itself.", style="Hint.TLabel", wraplength=WRAP,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
+        frame = ttk.LabelFrame(tab, text=" Font ", padding=10)
+        frame.pack(fill="x", pady=(12, 0))
         self.font_name = ttk.Label(frame, text="")
         self.font_name.pack(anchor="w")
         self.font_image = ttk.Label(frame)
@@ -968,6 +993,355 @@ class MainWindow:
                               f"too. Up to {MAX_LAYOUTS}.",
                   style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
 
+    def _build_extras_tab(self):
+        """Text, Countdown, To-do and Calendar, each in a tab of its own."""
+        tab = self._tab("Extras")
+        inner = ttk.Notebook(tab)
+        inner.pack(fill="both", expand=True)
+        self.block_show, self.block_size, self.block_swatch = {}, {}, {}
+        self.block_align, self.block_frost, self.block_pos = {}, {}, {}
+        self.block_widgets = {}             # what each block's switch enables
+
+        def page(title):
+            frame = ttk.Frame(inner, padding=8)
+            inner.add(frame, text=f" {title} ")
+            return frame
+
+        # Text
+        frame = page("Text")
+        self._block_switch(frame, "note", "Show this text")
+        self.note_box = tk.Text(frame, height=5, width=36, wrap="word", undo=True,
+                                font=tkfont.nametofont("TkDefaultFont"))
+        self.note_box.pack(fill="x", pady=(4, 0))
+        self.note_box.bind("<<Modified>>", self._note_typed)
+        ttk.Label(frame, text=f"A quote, a reminder, anything. Up to {MAX_NOTE_LINES} "
+                              "lines; long lines wrap on the screen.",
+                  style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(2, 0))
+        self.block_widgets["note"] = [self.note_box]
+        self._block_controls(frame, "note")
+
+        # Countdown
+        frame = page("Countdown")
+        self._block_switch(frame, "countdown", "Show a countdown")
+        grid = ttk.Frame(frame)
+        grid.pack(fill="x", pady=(4, 0))
+        self.countdown_mode = ttk.Combobox(grid, state="readonly", width=24,
+                                           values=[text for _, text in COUNTDOWN_CHOICES])
+        self.countdown_mode.bind("<<ComboboxSelected>>", lambda e: self._set(
+            "countdown_mode", COUNTDOWN_CHOICES[self.countdown_mode.current()][0]))
+        self.countdown_date = tk.StringVar()
+        self.countdown_time = tk.StringVar()
+        self.countdown_label = tk.StringVar()
+        dates = ttk.Frame(grid)
+        self.countdown_date_entry = ttk.Entry(dates, textvariable=self.countdown_date, width=12)
+        self.countdown_date_entry.pack(side="left")
+        ttk.Label(dates, text="time").pack(side="left", padx=(10, 4))
+        self.countdown_time_entry = ttk.Entry(dates, textvariable=self.countdown_time, width=6)
+        self.countdown_time_entry.pack(side="left")
+        limit = self.root.register(lambda p: len(p) <= MAX_COUNTDOWN_LABEL)
+        self.countdown_label_entry = ttk.Entry(grid, textvariable=self.countdown_label, width=26,
+                                               validate="key", validatecommand=(limit, "%P"))
+        for var in (self.countdown_date, self.countdown_time, self.countdown_label):
+            var.trace_add("write", lambda *_: self._countdown_typed())
+        self._grid(grid, [("Counts", self.countdown_mode), ("Date", dates),
+                          ("Name", self.countdown_label_entry)])
+        self.countdown_example = self._fixed_label(frame, 2, WRAP, style="Hint.TLabel",
+                                                   wraplength=WRAP, justify="left")
+        self.block_widgets["countdown"] = [self.countdown_mode, self.countdown_date_entry,
+                                           self.countdown_label_entry]
+        self._block_controls(frame, "countdown")
+
+        # To-do list
+        frame = page("To-do")
+        self._block_switch(frame, "todo", "Show the to-do list")
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Label(row, text="Title").pack(side="left")
+        self.todo_title = tk.StringVar()
+        limit = self.root.register(lambda p: len(p) <= MAX_TODO_TEXT)
+        self.todo_title_entry = ttk.Entry(row, textvariable=self.todo_title, width=28,
+                                          validate="key", validatecommand=(limit, "%P"))
+        self.todo_title_entry.pack(side="left", padx=(8, 0))
+        self.todo_title.trace_add("write", lambda *_: self._set_typed(
+            "todo_title", self.todo_title.get().strip(), self.todo_title_entry))
+        box = ttk.Frame(frame)
+        box.pack(fill="x", pady=(6, 0))
+        self.todo_tree = ttk.Treeview(box, show="tree", height=5, selectmode="browse")
+        self.todo_tree.column("#0", width=290)
+        bar = ttk.Scrollbar(box, orient="vertical", command=self.todo_tree.yview)
+        self.todo_tree.configure(yscrollcommand=bar.set)
+        self.todo_tree.pack(side="left", fill="x", expand=True)
+        bar.pack(side="left", fill="y")
+        self.todo_tree.bind("<Button-1>", self._todo_click)
+        self.todo_tree.bind("<Double-Button-1>", self._todo_edit)
+        self.todo_tree.bind("<<TreeviewSelect>>", lambda e: self._update_controls())
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(6, 0))
+        self.todo_new = tk.StringVar()
+        self.todo_entry = ttk.Entry(row, textvariable=self.todo_new, width=28,
+                                    validate="key", validatecommand=(limit, "%P"))
+        self.todo_entry.pack(side="left")
+        self.todo_entry.bind("<Return>", lambda e: self._todo_add())
+        self.todo_add_btn = ttk.Button(row, text="Add", width=6, command=self._todo_add)
+        self.todo_add_btn.pack(side="left", padx=(6, 0))
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(6, 0))
+        self.todo_tick_btn = ttk.Button(row, text="Tick / untick",
+                                        command=lambda: self._todo_selected("toggle"))
+        self.todo_tick_btn.pack(side="left")
+        self.todo_remove_btn = ttk.Button(row, text="Remove",
+                                          command=lambda: self._todo_selected("remove"))
+        self.todo_remove_btn.pack(side="left", padx=6)
+        self.todo_clear_btn = ttk.Button(row, text="Remove ticked",
+                                         command=lambda: self._todo_live("remove_done"))
+        self.todo_clear_btn.pack(side="left")
+        ttk.Label(frame, text="Ticking and removing show on the screen straight away. "
+                              "New or edited items show when you Apply. Double-click "
+                              "an item to edit it.",
+                  style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(6, 0))
+        self.block_widgets["todo"] = [self.todo_title_entry]
+        self._block_controls(frame, "todo")
+
+        # Calendar
+        frame = page("Calendar")
+        self.calendar_mode = tk.StringVar(value="off")
+        self.calendar_style = tk.StringVar(value="month")
+        self.week_start = tk.StringVar(value="mon")
+        for value, text in (("off", "No calendar"), ("under", "Under the date"),
+                            ("instead", "Instead of the date")):
+            ttk.Radiobutton(frame, text=text, value=value, variable=self.calendar_mode,
+                            command=self._calendar_changed).pack(anchor="w")
+        grid = ttk.Frame(frame)
+        grid.pack(fill="x", pady=(10, 0))
+        styles, starts = ttk.Frame(grid), ttk.Frame(grid)
+        self.calendar_widgets = []
+        for parent, var, choices, command in (
+                (styles, self.calendar_style, (("month", "Month grid"), ("week", "Week strip")),
+                 self._calendar_changed),
+                (starts, self.week_start, (("mon", "Monday"), ("sun", "Sunday")),
+                 lambda: self._set("week_start", self.week_start.get()))):
+            for value, text in choices:
+                radio = ttk.Radiobutton(parent, text=text, value=value, variable=var,
+                                        command=command)
+                radio.pack(side="left", padx=(0, 10))
+                self.calendar_widgets.append(radio)
+        self.calendar_size = Slider(grid, 8, 40, _px, lambda v: self._set("calendar_size", round(v)),
+                                    length=120)
+        self.calendar_swatch = Swatch(grid, "Calendar colour",
+                                      lambda c: self._set("calendar_color", c))
+        self._grid(grid, [("Style", styles), ("Week starts", starts),
+                          ("Size", self.calendar_size), ("Colour", self.calendar_swatch)])
+        self.calendar_widgets += [self.calendar_size, self.calendar_swatch]
+        ttk.Label(frame, text="The calendar is part of the clock block and moves with it. "
+                              "Today is marked.", style="Hint.TLabel", wraplength=WRAP,
+                  justify="left").pack(anchor="w", pady=(10, 0))
+
+    def _block_switch(self, parent, block, text):
+        var = self.block_show[block] = tk.BooleanVar()
+        ttk.Checkbutton(parent, text=text, variable=var,
+                        command=lambda: self._set(f"show_{block}", var.get())).pack(anchor="w")
+
+    def _block_controls(self, parent, block):
+        """Size, colour, alignment, panel and height: the same for each block."""
+        frame = ttk.Frame(parent)
+        frame.pack(fill="x", pady=(8, 0))
+        size = self.block_size[block] = Slider(
+            frame, 8, 60, _px, lambda v: self._set(f"{block}_size", round(v)), length=120)
+        swatch = self.block_swatch[block] = Swatch(
+            frame, "Colour", lambda c: self._set(f"{block}_color", c))
+        align = self.block_align[block] = tk.StringVar()
+        frost = self.block_frost[block] = tk.BooleanVar()
+        places = ttk.Frame(frame)
+        radios = [ttk.Radiobutton(places, text=text, value=value, variable=align,
+                                  command=lambda: self._set(f"{block}_align", align.get()))
+                  for value, text in (("left", "Left"), ("center", "Centre"), ("right", "Right"))]
+        for radio in radios:
+            radio.pack(side="left", padx=(0, 6))
+        panel = ttk.Checkbutton(places, text="Panel", variable=frost,
+                                command=lambda: self._set(f"{block}_frost", frost.get()))
+        panel.pack(side="left", padx=(6, 0))
+        pos = self.block_pos[block] = Slider(
+            frame, 0.0, 1.0, _height, lambda v: self._set(f"{block}_pos", round(v, 3)),
+            length=150)
+        ttk.Label(frame, text="Size").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=2)
+        size.grid(row=0, column=1, sticky="w")
+        swatch.grid(row=0, column=2, padx=(4, 0))
+        ttk.Label(frame, text="Place").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
+        places.grid(row=1, column=1, columnspan=2, sticky="w")
+        ttk.Label(frame, text="Height").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
+        pos.grid(row=2, column=1, columnspan=2, sticky="w")
+        self.block_widgets[block] += [size, swatch, *radios, panel, pos]
+
+    # -- the extras' own inputs ------------------------------------------------------
+
+    def _set_typed(self, key, value, entry):
+        """A text box changed a setting. Pushing the look back must not
+        rewrite the box being typed in."""
+        if not self._loading and value != self.look[key]:
+            self._set(key, value)
+
+    def _note_typed(self, _event=None):
+        if not self.note_box.edit_modified():
+            return
+        self.note_box.edit_modified(False)
+        text = self.note_box.get("1.0", "end-1c")
+        lines = text.split("\n")[:MAX_NOTE_LINES]
+        text = "\n".join(line.replace("\t", " ") for line in lines)[:MAX_NOTE]
+        if not self._loading and text != self.look["note_text"]:
+            self._set("note_text", text)
+
+    def _countdown_typed(self):
+        if self._loading:
+            return
+        date = self.countdown_date.get().strip()
+        when = self.countdown_time.get().strip()
+        label = self.countdown_label.get().strip()
+        changes = {"countdown_label": label}
+        if _valid(date, "%Y-%m-%d"):
+            changes["countdown_date"] = date
+        if not when or _valid(when, "%H:%M"):
+            changes["countdown_time"] = when
+        if any(self.look[key] != value for key, value in changes.items()):
+            self.look.update(changes)
+            self.changed()
+        else:
+            self._show_countdown_example()
+
+    def _show_countdown_example(self):
+        date = self.countdown_date.get().strip()
+        when = self.countdown_time.get().strip()
+        if not _valid(date, "%Y-%m-%d"):
+            text = "Write the date as year-month-day, for example 2026-12-25."
+        elif when and not _valid(when, "%H:%M"):
+            text = "Write the time as hours:minutes, for example 18:30."
+        else:
+            look = self.look
+            target = datetime.datetime.strptime(
+                date + (" " + when if when and look["countdown_mode"] == "to-hours" else ""),
+                "%Y-%m-%d %H:%M" if when and look["countdown_mode"] == "to-hours" else "%Y-%m-%d")
+            shows, _ = countdown_text(look["countdown_mode"], target, look["countdown_label"],
+                                      datetime.datetime.now())
+            text = (f"Shows now: {shows}" if shows else
+                    "Shows nothing now: the date has passed (or, counting since it, "
+                    "hasn't come yet).")
+        self.countdown_example.configure(text=text)
+
+    def _calendar_changed(self):
+        mode, style = self.calendar_mode.get(), self.calendar_style.get()
+        if self._loading:
+            return
+        look = self.look
+        was_instead = look["calendar"] and not look["show_date"]
+        look["calendar"] = None if mode == "off" else style
+        if mode == "instead":
+            look["show_date"] = False
+        elif mode == "under" or was_instead:
+            look["show_date"] = True
+        self.changed()
+
+    def _todo_items_view(self):
+        """Put the form's to-do items into the list box, if they changed."""
+        items = self.look["todo_items"]
+        key = json.dumps(items)
+        if key == self._todo_shown:
+            return
+        self._todo_shown = key
+        selected = self.todo_tree.selection()
+        self.todo_tree.delete(*self.todo_tree.get_children())
+        for item in items:
+            mark = TICKED if item["done"] else BOX
+            self.todo_tree.insert("", "end", iid=str(item["id"]), text=f"{mark}  {item['text']}")
+        if selected and self.todo_tree.exists(selected[0]):
+            self.todo_tree.selection_set(selected[0])
+
+    def _todo_click(self, event):
+        """A click on an item's box ticks or unticks it."""
+        row = self.todo_tree.identify_row(event.y)
+        if row and event.x < 30:
+            self._todo_live("toggle", int(row))
+            return "break"
+        return None
+
+    def _todo_selected(self, action):
+        selected = self.todo_tree.selection()
+        if selected:
+            self._todo_live(action, int(selected[0]))
+
+    def _todo_live(self, action, ident=None):
+        """Tick, untick or remove straight away. Items the screen already has
+        change there at once (the service's "todo" command); items added and
+        not applied yet only change in the form."""
+        look = self.look
+        if action == "toggle":
+            item = next((i for i in look["todo_items"] if i["id"] == ident), None)
+            if item is None:
+                return
+            action = "untick" if item["done"] else "tick"
+
+        def apply_to(items):
+            if action == "remove_done":
+                return [i for i in items if not i["done"]]
+            out = []
+            for i in items:
+                if i["id"] == ident:
+                    if action == "remove":
+                        continue
+                    i = {**i, "done": action == "tick"}
+                out.append(i)
+            return out
+
+        on_screen = action == "remove_done" or any(
+            i["id"] == ident for i in self._saved_look["todo_items"])
+        look["todo_items"] = apply_to(look["todo_items"])
+        if on_screen and self.installed:
+            self._saved_look["todo_items"] = apply_to(self._saved_look["todo_items"])
+            fields = {"action": action} if ident is None else {"action": action, "id": ident}
+
+            def done(error):
+                if error:
+                    messagebox.showerror(DISPLAY_NAME, f"Could not update the to-do list:\n\n{error}",
+                                         parent=self.root)
+            self.app.background(lambda: send_settings("todo", **fields), done)
+        if action == "remove" and self._editing == ident:
+            self._stop_editing()
+        self.changed()
+
+    def _todo_add(self):
+        text = self.todo_new.get().strip()
+        if not text:
+            return
+        items = [dict(i) for i in self.look["todo_items"]]
+        if self._editing is not None:
+            for item in items:
+                if item["id"] == self._editing:
+                    item["text"] = text
+            self._stop_editing()
+        elif len(items) >= MAX_TODO_ITEMS:
+            messagebox.showinfo(DISPLAY_NAME, f"The list holds up to {MAX_TODO_ITEMS} items.",
+                                parent=self.root)
+            return
+        else:
+            ids = [i["id"] for i in items + self._saved_look["todo_items"]]
+            items.append({"id": max(ids, default=0) + 1, "text": text, "done": False})
+            self.todo_new.set("")
+        self._set("todo_items", items)
+
+    def _todo_edit(self, event):
+        row = self.todo_tree.identify_row(event.y)
+        if not row or event.x < 30:
+            return
+        item = next((i for i in self.look["todo_items"] if i["id"] == int(row)), None)
+        if item:
+            self._editing = item["id"]
+            self.todo_new.set(item["text"])
+            self.todo_add_btn.configure(text="Save")
+            self.todo_entry.focus_set()
+
+    def _stop_editing(self):
+        self._editing = None
+        self.todo_new.set("")
+        self.todo_add_btn.configure(text="Add")
+
     @staticmethod
     def _fixed_label(parent, lines, width, anchor="w", **options):
         """A label in a box of fixed size, packed into `parent`, so a warning
@@ -1016,7 +1390,9 @@ class MainWindow:
         self.changed()
 
     def changed(self):
-        self.dirty = True
+        # Changed means different from what the screen shows: undoing a change
+        # by hand counts as no change.
+        self.dirty = bool(self.chosen or self.use_default) or self.look != self._saved_look
         self._show_look()
         self._update_controls()
         self.render_preview()
@@ -1056,12 +1432,45 @@ class MainWindow:
                 if name.get() != text and (focus is not entry or not slot):
                     name.set(text)
             self.frost.set(look["frost"])
+            self.brightness.set(look["brightness"])
             self.show_stats.set(look["show_stats"])
             self.frost_dark.set(look["frost_dark"])
             self.frost_blur.set(look["frost_blur"])
+            self._show_extras(focus)
             self._show_font()
         finally:
             self._loading = False
+
+    def _show_extras(self, focus):
+        """The Extras tab's part of _show_look."""
+        look = self.look
+        for block in EXTRA_BLOCKS:
+            self.block_show[block].set(look[f"show_{block}"])
+            self.block_swatch[block].set(look[f"{block}_color"])
+            self.block_align[block].set(look[f"{block}_align"])
+            self.block_frost[block].set(look[f"{block}_frost"])
+        if focus is not self.note_box and self.note_box.get("1.0", "end-1c") != look["note_text"]:
+            state = self.note_box.cget("state")
+            self.note_box.configure(state="normal")
+            self.note_box.delete("1.0", "end")
+            self.note_box.insert("1.0", look["note_text"])
+            self.note_box.edit_modified(False)
+            self.note_box.configure(state=state)
+        self.countdown_mode.current([k for k, _ in COUNTDOWN_CHOICES].index(look["countdown_mode"]))
+        for var, entry, key in ((self.countdown_date, self.countdown_date_entry, "countdown_date"),
+                                (self.countdown_time, self.countdown_time_entry, "countdown_time"),
+                                (self.countdown_label, self.countdown_label_entry, "countdown_label"),
+                                (self.todo_title, self.todo_title_entry, "todo_title")):
+            if focus is not entry and var.get().strip() != look[key]:
+                var.set(look[key])
+        self._show_countdown_example()
+        self._todo_items_view()
+        self.calendar_mode.set("off" if not look["calendar"] else
+                               "under" if look["show_date"] else "instead")
+        if look["calendar"]:
+            self.calendar_style.set(look["calendar"])
+        self.week_start.set(look["week_start"])
+        self.calendar_swatch.set(look["calendar_color"])
 
     def _show_font(self):
         file = self.look["font"] or DEFAULT_FONT
@@ -1081,7 +1490,9 @@ class MainWindow:
         custom = self.date_format.current() == len(DATE_PRESETS)
         key = (look["fit"], look["show_time"], look["show_date"], custom,
                tuple(bool(s) for s in look["slots"]), look["show_stats"], look["frost"],
-               self.dirty,
+               tuple(look[f"show_{b}"] for b in EXTRA_BLOCKS), look["calendar"],
+               look["countdown_mode"], self.todo_tree.selection(), self._editing,
+               bool(look["todo_items"]), self.dirty,
                self.installed, self.busy, self.layout_list.curselection())
         if key == self._controls_key:
             return
@@ -1106,6 +1517,14 @@ class MainWindow:
         _enable([self.label_size, self.value_size, self.label_swatch, self.value_swatch,
                  self.stats_pos], any_stats)
         _enable([self.frost_dark, self.frost_blur], look["frost"])
+        for block in EXTRA_BLOCKS:
+            _enable(self.block_widgets[block], look[f"show_{block}"])
+        _enable([self.countdown_time_entry],
+                look["show_countdown"] and look["countdown_mode"] == "to-hours")
+        _enable(self.calendar_widgets, bool(look["calendar"]))
+        chosen_item = bool(self.todo_tree.selection())
+        _enable([self.todo_tick_btn, self.todo_remove_btn], chosen_item)
+        _enable([self.todo_clear_btn], any(i["done"] for i in look["todo_items"]))
         settled = self.installed and not self.busy
         _enable([self.apply_btn, self.undo_btn], self.dirty and settled)
         _enable([self.reset_btn, self.choose_btn, self.default_btn, self.save_btn], settled)
@@ -1228,6 +1647,7 @@ class MainWindow:
             return
         self._form_key = key
         self.look = clean_look(config)
+        self._saved_look = copy.deepcopy(self.look)
         self._custom_date = self.look["date_format"] not in DATE_PRESETS
         self.chosen, self.use_default = None, False
         self.picture_name.set((s.get("picture_label") or "Your picture")
@@ -1286,28 +1706,31 @@ class MainWindow:
             if custom and scale > 1.05 else "")
 
     def _show_space(self, layout):
-        """The empty band between the clock and the stats, in panel pixels --
-        or above or below the one block that is shown."""
+        """The tallest empty band between the blocks, in panel pixels, for
+        anyone making a picture to fit it."""
         w, h = layout.w, layout.h
-        blocks = [(name, box) for name, box in (("clock", layout.clock_box),
-                                                ("stats", layout.stats_box)) if box]
-        if len(blocks) == 2:
-            (upper, a), (lower, b) = sorted(blocks, key=lambda item: item[1][1])
-            if b[1] <= a[3]:
-                text = "The clock and the stats overlap: no space between them."
-            else:
-                text = (f"Space between the {upper} and the {lower}:\n"
-                        f"{w} × {b[1] - a[3]} px, from {a[3]} to {b[1]} px down")
-        elif blocks:
-            name, box = blocks[0]
-            if box[1] >= h - box[3]:
-                text = (f"Space above the {name}:\n"
-                        f"{w} × {box[1]} px, from the top to {box[1]} px down")
-            else:
-                text = (f"Space below the {name}:\n"
-                        f"{w} × {h - box[3]} px, from {box[3]} px down to the bottom")
-        else:
+        bands, y, above = [], 0, None
+        for name, box in sorted(layout.boxes.items(), key=lambda item: item[1][1]):
+            if box[1] > y:
+                bands.append((box[1] - y, y, box[1], above, name))
+            if box[3] > y:
+                y, above = box[3], name
+        if y < h:
+            bands.append((h - y, y, h, above, None))
+        if not layout.boxes:
             text = f"Nothing is drawn over the picture:\nall {w} × {h} px show."
+        elif not bands:
+            text = "The blocks cover the whole screen: no free space."
+        else:
+            height, top, bottom, above, below = max(bands)
+            size = f"{w} × {height} px"
+            if above and below:
+                text = (f"Space between the {BLOCK_NAMES[above]} and the {BLOCK_NAMES[below]}:"
+                        f"\n{size}, from {top} to {bottom} px down")
+            elif below:
+                text = f"Space above the {BLOCK_NAMES[below]}:\n{size}, from the top to {bottom} px down"
+            else:
+                text = f"Space below the {BLOCK_NAMES[above]}:\n{size}, from {top} px down to the bottom"
         self.space_info.configure(text=text)
 
     # -- the preview ------------------------------------------------------------
@@ -1375,15 +1798,27 @@ class MainWindow:
                 slider.set(font.size, " auto")
             elif not self._drag:
                 slider.set(min(size, limit))
-        for block, pos, box in (("clock", layout.clock_pos, layout.clock_box),
-                                ("stats", layout.stats_pos, layout.stats_box)):
-            if box and self.look[f"{block}_pos"] is None:
-                getattr(self, f"{block}_pos").set(pos)
+        extras = {**{b: self.block_size[b] for b in EXTRA_BLOCKS},
+                  "calendar": self.calendar_size}
+        for part, slider in extras.items():
+            limit, actual = layout.limits.get(part), layout.sizes.get(part)
+            if limit is None or actual is None:
+                continue                    # hidden: nothing to measure
+            slider.set_range(8, max(9, limit))
+            size = self.look[f"{part}_size"]
+            if size is None:
+                slider.set(actual, " auto")
+            elif not self._drag:
+                slider.set(min(size, limit))
+        # Every shown block's height slider shows where it sits now.
+        heights = {"clock": self.clock_pos, "stats": self.stats_pos, **self.block_pos}
+        for block, pos in layout.positions.items():
+            heights[block].set(pos)
         self.stats_warn.configure(
             text="The stats are taller than the screen: make the text smaller or "
                  "show fewer." if layout.overflow else "")
-        clock, stats = layout.clock_box, layout.stats_box
-        overlap = clock and stats and clock[1] < stats[3] and stats[1] < clock[3]
+        boxes = sorted(layout.boxes.values(), key=lambda box: box[1])
+        overlap = any(a[3] > b[1] for a, b in zip(boxes, boxes[1:]))
         self.preview_hint.configure(text=OVERLAP_HINT if overlap else PREVIEW_HINT,
                                     style="Note.TLabel" if overlap else "Hint.TLabel")
 
@@ -1396,8 +1831,8 @@ class MainWindow:
             return None
         x, y = event.x / self.k, event.y / self.k
         target = None
-        for block, box in (("clock", layout.clock_box), ("stats", layout.stats_box)):
-            if box and box[0] <= x <= box[2] and box[1] <= y <= box[3]:
+        for block, box in layout.boxes.items():     # the last one drawn wins
+            if box[0] <= x <= box[2] and box[1] <= y <= box[3]:
                 target = (block, box)
         return target or ("picture", None)
 
@@ -1416,7 +1851,7 @@ class MainWindow:
         if block == "picture":
             self._drag = ("picture", event.x, event.y, self.look["pan_x"], self.look["pan_y"])
         else:
-            start = getattr(self._layout, f"{block}_pos")
+            start = self._layout.positions[block]
             travel = FIT_SIZE[1] - 2 * box[0] - (box[3] - box[1])
             self._drag = (block, event.x, event.y, start, travel)
 
@@ -1475,8 +1910,11 @@ class MainWindow:
     # -- apply, undo, reset -------------------------------------------------------
 
     def reset(self):
-        """Everything back to how it comes, except the picture itself."""
-        self.look = clean_look({})
+        """Everything back to how it comes, except the picture itself and what
+        the user wrote: the text, the countdown and the to-do list stay (their
+        blocks are switched off, as they come)."""
+        kept = {key: self.look[key] for key in CONTENT_KEYS}
+        self.look = clean_look(kept)
         self._custom_date = False
         self._show_look()
         self._place_spots()
@@ -1607,6 +2045,14 @@ class MainWindow:
 
 def _clamp(value):
     return min(1.0, max(0.0, value))
+
+
+def _valid(text, fmt):
+    try:
+        datetime.datetime.strptime(text, fmt)
+        return True
+    except ValueError:
+        return False
 
 
 def first_frame(path):

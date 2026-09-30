@@ -38,12 +38,14 @@ Usage:
 
 import argparse
 import atexit
+import calendar
 import datetime
 import functools
 import os
 import re
 import struct
 import sys
+import threading
 import time
 import zlib
 from io import BytesIO
@@ -298,6 +300,14 @@ class PdhCounter:
             return None
         return self.reduce(data) if data else None
 
+    def close(self):
+        if self.query is not None:
+            try:
+                self.pdh.CloseQuery(self.query)
+            except Exception:
+                pass
+            self.query = self.counter = None
+
 
 # name -> (label, widest plausible value, reader). The sample string is what
 # the value font gets sized against, so a reading can never overflow its
@@ -380,7 +390,7 @@ class Metrics:
     forces the affected frames to be re-encoded.
     """
 
-    def __init__(self, slots, interval=2.0):
+    def __init__(self, slots, interval=2.0, get_temps=None):
         self.slots, self.interval = slots, interval
         self.gpu = PdhCounter(r"\GPU Engine(*)\Utilization Percentage",
                               reduce=_busiest_engine)
@@ -401,10 +411,21 @@ class Metrics:
         self._slow = {}
         self._cache = None
         self._next = 0.0
-        self.temps = None
+        # The service shares one Temperatures between settings changes
+        # (get_temps): opening LibreHardwareMonitor takes about a second.
+        self.temps, self._own_temps = None, False
         if any(s in TEMP_SLOTS for s in slots):
-            from temps_win import Temperatures
-            self.temps = Temperatures()
+            if get_temps:
+                self.temps = get_temps()
+            else:
+                from temps_win import Temperatures
+                self.temps, self._own_temps = Temperatures(), True
+
+    def close(self):
+        for counter in (self.gpu, self.vram, self.diskact, self.perf):
+            counter.close()
+        if self.temps and self._own_temps:
+            self.temps.close()
 
     def _cached(self, key, seconds, fn):
         """Memoise a reading that changes slowly or costs real disk I/O."""
@@ -566,6 +587,9 @@ class SampleMetrics:
     def refresh(self):
         pass
 
+    def close(self):
+        pass
+
     def nic(self):
         return "example values"
 
@@ -586,26 +610,74 @@ def frost(img, box, blur, darken, corner):
     img.paste(region, (x0, y0), mask)
 
 
+class Shape:
+    """A drawn item that isn't text: a to-do box or tick, a strike-through,
+    the calendar's mark on today. Edged in black like the text's outline, so
+    it reads over any picture.
+
+      box   outline of a rounded rectangle      mark  filled rounded rectangle
+      line  a line through the points in `xy`
+    """
+
+    def __init__(self, kind, xy, fill, width=2, radius=0):
+        self.kind, self.xy, self.fill = kind, xy, fill
+        self.width, self.radius = width, radius
+
+    def draw(self, draw):
+        if self.kind == "line":
+            draw.line(self.xy, fill="black", width=self.width + 2, joint="curve")
+            draw.line(self.xy, fill=self.fill, width=self.width, joint="curve")
+        elif self.kind == "box":
+            draw.rounded_rectangle(self.xy, self.radius, outline="black", width=self.width + 2)
+            x0, y0, x1, y1 = self.xy
+            draw.rounded_rectangle((x0 + 1, y0 + 1, x1 - 1, y1 - 1), self.radius,
+                                   outline=self.fill, width=self.width)
+        else:
+            draw.rounded_rectangle(self.xy, self.radius, fill=self.fill,
+                                   outline="black", width=1)
+
+
 def compose(frame, items, panels=(), blur=6, darken=0.5, corner=24):
     """Frost each panel box and draw the text over it, the right way up.
 
     This is what --preview saves: the panel's picture without the 180 degree
-    flip that makes it readable in the case. Each item is
-    (text, font, x, y, anchor, colour).
+    flip that makes it readable in the case. Each item is a Shape or
+    (text, font, x, y, anchor, colour), optionally with a seventh element,
+    False, for text drawn without its black outline.
     """
     img = frame.copy()
     for box in panels:
         frost(img, box, blur, darken, corner)
     draw = ImageDraw.Draw(img)
-    for text, font, x, y, anchor, fill in items:
+    for item in items:
+        if isinstance(item, Shape):
+            item.draw(draw)
+            continue
+        text, font, x, y, anchor, fill = item[:6]
+        outline = item[6] if len(item) > 6 else True
         # "la" = left edge / "ra" = right edge, both on the ascender line.
         draw.text((x, y), text, font=font, fill=fill,
-                  stroke_width=max(2, font.size // 10), stroke_fill="black",
-                  anchor=anchor)
+                  stroke_width=max(2, font.size // 10) if outline else 0,
+                  stroke_fill="black", anchor=anchor)
     return img
 
 
-def text_bands(items, size):
+def dim(img, percent):
+    """Scale an image's colours to `percent` of their brightness.
+
+    The panel's backlight can't be controlled (see docs/HOW-IT-WORKS.md), so
+    --brightness darkens the pixels instead. A lookup table, so it's cheap;
+    an RGBA image keeps its alpha.
+    """
+    if percent >= 100:
+        return img
+    lut = [round(v * percent / 100) for v in range(256)] * 3
+    if img.mode == "RGBA":
+        lut += list(range(256))
+    return img.point(lut)
+
+
+def text_bands(items, size, brightness=100):
     """One tick's text, drawn once to be laid over every frame.
 
     Returns (y, strip) pairs: the rows of the upside-down frame that hold
@@ -614,9 +686,12 @@ def text_bands(items, size):
     drawing on the frame itself would -- bar a handful (20 of 472,320 in
     tests) where the outline and the fill both only partly cover a pixel,
     which come out a few shades darker. JPEG changes pixels by more.
+
+    The strips are dimmed like the frames (see prepare), so the whole screen
+    comes out at `brightness`.
     """
     layer = compose(Image.new("RGBA", size, (0, 0, 0, 0)), items)
-    layer = layer.transpose(Image.ROTATE_180)
+    layer = dim(layer, brightness).transpose(Image.ROTATE_180)
     rows = layer.getchannel("A").getprojection()[1]
     # Runs of rows with text in them, joined across small gaps.
     runs, start = [], None
@@ -643,28 +718,131 @@ def encode_with(frame, size, bands, quality):
     return buf.getvalue()
 
 
+BLOCK_GAP = 12                      # between blocks stacked automatically
+EXTRA_BLOCKS = ("note", "countdown", "todo")    # in their stacking order
+ALIGN = {"left": "la", "center": "ma", "right": "ra"}
+WEEKDAY_LETTERS = "MTWTFSS"         # Monday first
+COUNTDOWN_MODES = ("to", "to-hours", "since")
+DONE_SHADE = 0.55                   # how bright a ticked to-do item stays
+
+
+def wrap(text, font, width):
+    """`text` broken into lines no wider than `width`: between words, or
+    inside a word too long for a line of its own. Blank lines are kept."""
+    lines = []
+    for paragraph in text.split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            candidate = f"{line} {word}" if line else word
+            if font.getlength(candidate) <= width:
+                line = candidate
+                continue
+            if line:
+                lines.append(line)
+            while len(word) > 1 and font.getlength(word) > width:
+                cut = len(word) - 1
+                while cut > 1 and font.getlength(word[:cut]) > width:
+                    cut -= 1
+                lines.append(word[:cut])
+                word = word[cut:]
+            line = word
+        lines.append(line)
+    return lines
+
+
+def _plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def countdown_text(mode, target, label, now):
+    """The countdown's line at `now` (None when it has nothing to show), and
+    when that line next changes (a datetime, or None if it never will).
+
+      to        "12 days to Launch", "Launch is today!", then nothing
+      to-hours  "12 days 5 h to Launch", "3 h to Launch", "Launch is today!"
+      since     "214 days since I quit" -- from the date on
+    """
+    midnight = datetime.datetime.combine(now.date() + datetime.timedelta(1),
+                                         datetime.time.min)
+    today = f"{label} is today!" if label else "Today!"
+    if mode == "since":
+        days = (now.date() - target.date()).days
+        if days < 0:
+            return None, datetime.datetime.combine(target.date(), datetime.time.min)
+        return (f"{_plural(days, 'day')} since {label}" if label
+                else _plural(days, "day")), midnight
+    if mode == "to-hours":
+        left = (target - now).total_seconds()
+        if left > 0:
+            days, hours = int(left // 86400), int(left % 86400 // 3600)
+            if days or hours:
+                span = " ".join(([_plural(days, "day")] if days else []) + [f"{hours} h"])
+            else:
+                span = "Under an hour"
+            text = f"{span} to {label}" if label else f"{span} to go"
+            # The hours figure drops each time `left` passes a whole hour.
+            return text, now + datetime.timedelta(seconds=(left % 3600) or 3600)
+    else:
+        days = (target.date() - now.date()).days
+        if days > 0:
+            return (f"{_plural(days, 'day')} to {label}" if label
+                    else f"{_plural(days, 'day')} to go"), midnight
+    if now.date() == target.date():
+        return today, midnight
+    return None, None
+
+
+def calendar_weeks(style, week_start, today):
+    """The calendar's content for `today`: (header or None, weekday letters,
+    weeks), each week seven cells of (date, faint) or None for a blank.
+
+      month  "September 2026" over the month, blank cells outside it
+      week   this week only, other months' days faint
+    """
+    first = 0 if week_start == "mon" else 6
+    letters = WEEKDAY_LETTERS[first:] + WEEKDAY_LETTERS[:first]
+    weeks = calendar.Calendar(first).monthdatescalendar(today.year, today.month)
+    if style == "week":
+        week = next(w for w in weeks if today in w)
+        return None, letters, [[(d, d.month != today.month) for d in week]]
+    return (today.strftime("%B %Y"), letters,
+            [[(d, False) if d.month == today.month else None for d in w] for w in weeks])
+
+
 class Layout:
     """Where everything goes on a w x h frame, and the fonts it is drawn in.
 
-    It also records how large each kind of text could grow (`limits`) and
-    where the two blocks sit as a share of the height they can move through
-    (`clock_pos`, `stats_pos`) -- what the app's sliders show.
+    Two kinds of content:
+      items()  the clock, the date and the stats, which change as it runs;
+               drawn once per change and laid over each frame (text_bands)
+      static   the text, countdown and to-do blocks and the calendar, which
+               only change at a known moment (`valid_until`); drawn into the
+               frames once, when they are prepared
+
+    It also records every block's box, how large each kind of text could grow
+    (`limits`), and where each block sits as a share of the height it can move
+    through (`positions`) -- what the app's sliders and dragging use.
     """
 
-    def __init__(self, args, w, h, rows, labels):
+    def __init__(self, args, w, h, rows, labels, now=None):
+        now = now or datetime.datetime.now()
         self.w, self.h, self.rows, self.labels = w, h, rows, labels
         self.show_time, self.show_date = not args.no_time, not args.no_date
         self.colors = {"time": args.time_color, "date": args.date_color,
                        "label": args.label_color, "value": args.value_color}
         self.time_fmt = TIME_FORMATS[args.time_format][1 if args.seconds else 0]
         self.date_fmt = date_strftime(args.date_format)
-        self.limits = {}
+        self.limits, self.boxes, self.positions = {}, {}, {}
+        self.sizes = {}                 # each extra block's text size, as drawn
+        self.static = []
+        changes = []                    # when static content next changes
 
         # Screen edge -> inset -> panel edge -> pad -> text.
         inset, padx, pady = args.frost_inset, args.frost_pad, args.frost_pad_y
         self.col_left, self.col_right = inset + padx, w - inset - padx
         avail = max(1, self.col_right - self.col_left)
         path = self.font_path = resolve_font(args.font)
+        align_x = {"left": self.col_left, "center": w // 2, "right": self.col_right}
 
         # No default size cap: both lines grow until they span --text-fill of
         # the panel, so the clock and the date come out the same width as each
@@ -707,21 +885,33 @@ class Layout:
         self.label_font = stat_font("label", lambda n: labels[n], args.label_size, w // 20)
         self.value_font = stat_font("value", lambda n: SLOTS[n][1], args.value_size, w // 11)
 
+        # The calendar, under the date (or in its place) in the clock block.
+        calendar_h, draw_calendar = 0, None
+        if args.calendar:
+            calendar_h, draw_calendar = self._calendar(args, path, avail, now)
+            changes.append(datetime.datetime.combine(now.date() + datetime.timedelta(1),
+                                                     datetime.time.min))
+
         # The clock block: at the top unless --clock-pos moves it.
         self.clock_box, self.clock_pos = None, 0.0
-        if self.show_time and self.show_date:
-            lines_h = round(self.time_font.size * 1.15) + self.date_font.size
-        else:
-            lines_h = (self.time_font or self.date_font or _font(path, 1)).size
-        if self.show_time or self.show_date:
+        date_off = round(self.time_font.size * 1.15) if self.show_time else 0
+        lines_h = (date_off + self.date_font.size if self.show_date
+                   else self.time_font.size if self.show_time else 0)
+        calendar_off = lines_h + (round(self._calendar_size * 0.8)
+                                  if lines_h and draw_calendar else 0)
+        if draw_calendar:
+            lines_h = calendar_off + calendar_h
+        if lines_h:
             panel_h = lines_h + 2 * pady
             travel = h - 2 * inset - panel_h
             top = inset + round(max(0, travel) * (args.clock_pos or 0))
             self.clock_pos = (top - inset) / travel if travel > 0 else 0.0
             self.clock_box = (inset, top, w - inset, top + panel_h)
             self.time_y = top + pady
-            self.date_y = self.time_y + (round(self.time_font.size * 1.15)
-                                         if self.show_time else 0)
+            self.date_y = self.time_y + date_off
+            if draw_calendar:
+                self.static += draw_calendar(self.time_y + calendar_off)
+            self._place("clock", self.clock_box, self.clock_pos)
 
         # The stats block.
         self.label_h = round(self.label_font.size * 1.3)
@@ -749,9 +939,186 @@ class Layout:
             # How far a block too tall for the screen runs off it.
             self.overflow = max(0, -travel)
             self.stats_box = (inset, top, w - inset, top + panel_h)
+            self._place("stats", self.stats_box, self.stats_pos)
 
         self.panels = [] if args.no_frost else [
             box for box in (self.clock_box, self.stats_box) if box]
+
+        # The extra blocks, stacked under the clock unless moved.
+        builders = {"note": self._note, "countdown": self._countdown, "todo": self._todo}
+        stack = (self.clock_box[3] if self.clock_box else inset - BLOCK_GAP) + BLOCK_GAP
+        for name in EXTRA_BLOCKS:
+            content_h, draw, change = builders[name](args, path, avail, align_x, now)
+            if change:
+                changes.append(change)
+            if not draw:
+                continue
+            panel_h = content_h + 2 * pady
+            travel = h - 2 * inset - panel_h
+            pos = getattr(args, f"{name}_pos")
+            if pos is None:
+                top = min(stack, h - inset - panel_h) if travel > 0 else inset
+            else:
+                top = inset + round(max(0, travel) * pos)
+            stack = top + panel_h + BLOCK_GAP
+            box = (inset, top, w - inset, top + panel_h)
+            self._place(name, box, (top - inset) / travel if travel > 0 else 0.0)
+            self.static += draw(top + pady)
+            if not args.no_frost and not getattr(args, f"{name}_no_frost"):
+                self.panels.append(box)
+
+        # When the static content goes out of date, as epoch seconds.
+        self.valid_until = min(changes).timestamp() if changes else None
+
+    def _place(self, name, box, pos):
+        self.boxes[name] = box
+        self.positions[name] = min(1.0, max(0.0, pos))
+
+    def _calendar(self, args, path, avail, now):
+        """(height, draw(top)) for the calendar."""
+        header, letters, weeks = calendar_weeks(args.calendar, args.week_start, now.date())
+        col_w = avail / 7
+        cell = max(1, int(col_w * 0.8))
+        samples = ["30", "31", "28", *letters]
+        wide = [header] if header else []
+        self.limits["calendar"] = min([fit_font(path, samples, cell, 400).size]
+                                      + [fit_font(path, wide, avail, 400).size] * bool(wide))
+        font = fit_font(path, samples, cell, args.calendar_size or self.w // 16)
+        if header:
+            font = min(font, fit_font(path, header, avail, font.size), key=lambda f: f.size)
+        self._calendar_size = size = self.sizes["calendar"] = font.size
+        row_h = round(size * 1.5)
+        n_rows = (1 if header else 0) + 1 + len(weeks)
+        color = args.calendar_color
+        faint = tuple(round(c * 0.45) for c in color)
+        box_top, box_bottom = font.getbbox("30", anchor="ma")[1::2]
+        pad = max(2, size // 6)
+        today = now.date()
+
+        def x_of(col):
+            return round(self.col_left + col_w * (col + 0.5))
+
+        def draw(top):
+            items, y = [], top
+            if header:
+                items.append((header, font, self.w // 2, y, "ma", color))
+                y += row_h
+            items += [(letter, font, x_of(c), y, "ma", faint) for c, letter in enumerate(letters)]
+            y += row_h
+            for week in weeks:
+                for c, cell_ in enumerate(week):
+                    if cell_ is None:
+                        continue
+                    day, dim_it = cell_
+                    x = x_of(c)
+                    if day == today:
+                        half = col_w * 0.42
+                        items.append(Shape("mark", (x - half, y + box_top - pad,
+                                                    x + half, y + box_bottom + pad),
+                                           color, radius=pad + 2))
+                        # Dark on the mark, and without the outline, which
+                        # would swallow a dark number.
+                        items.append((str(day.day), font, x, y, "ma", (0, 0, 0), False))
+                    else:
+                        items.append((str(day.day), font, x, y, "ma", faint if dim_it else color))
+                y += row_h
+            return items
+
+        return (n_rows - 1) * row_h + size, draw
+
+    def _note(self, args, path, avail, align_x, now):
+        """(height, draw(top), None) for the free text block."""
+        text = "\n".join(args.note_line).strip("\n")
+        if not text.strip():
+            return 0, None, None
+        words = [w for w in text.split() if w] or [text]
+        self.limits["note"] = min(200, fit_font(path, max(words, key=len), avail, 400).size)
+        font = _font(path, min(args.note_size or self.w // 16, self.limits["note"]))
+        self.sizes["note"] = font.size
+        lines = wrap(text, font, avail)
+        line_h = round(font.size * 1.3)
+        x, anchor, color = align_x[args.note_align], ALIGN[args.note_align], args.note_color
+
+        def draw(top):
+            return [(line, font, x, top + i * line_h, anchor, color)
+                    for i, line in enumerate(lines) if line]
+
+        return (len(lines) - 1) * line_h + font.size, draw, None
+
+    def _countdown(self, args, path, avail, align_x, now):
+        """(height, draw(top), when it changes) for the countdown line."""
+        if not args.countdown_date:
+            return 0, None, None
+        text, change = countdown_text(args.countdown_mode, args.countdown_date,
+                                      args.countdown_label, now)
+        if not text:
+            return 0, None, change
+        self.limits["countdown"] = fit_font(path, text, avail, 400).size
+        font = fit_font(path, text, avail, args.countdown_size or self.w // 13)
+        self.sizes["countdown"] = font.size
+        x, anchor = align_x[args.countdown_align], ALIGN[args.countdown_align]
+        return font.size, lambda top: [(text, font, x, top, anchor, args.countdown_color)], change
+
+    def _todo(self, args, path, avail, align_x, now):
+        """(height, draw(top), None) for the to-do list: an optional title,
+        then each item with its box; ticked items are ticked, crossed out and
+        dimmed."""
+        items = [parse_todo(item) for item in args.todo_item]
+        title = args.todo_title.strip()
+        if not items and not title:
+            return 0, None, None
+        size = args.todo_size or self.w // 16
+        box = round(size * 0.8)
+        gap = round(size * 0.45)
+        words = [w for _, text in items for w in text.split()] + title.split() or ["x"]
+        self.limits["todo"] = min(200, fit_font(path, max(words, key=len),
+                                                max(1, avail - box - gap), 400).size)
+        font = _font(path, min(size, self.limits["todo"]))
+        size = self.sizes["todo"] = font.size
+        box, gap = round(size * 0.8), round(size * 0.45)
+        line_h = round(size * 1.3)
+        # Boxes sit on the middle of a capital, strike-throughs on the middle
+        # of a small letter -- measured, since fonts differ.
+        cap = font.getbbox("H", anchor="la")
+        small = font.getbbox("x", anchor="la")
+        cap_mid, small_mid = (cap[1] + cap[3]) / 2, (small[1] + small[3]) / 2
+        color = args.todo_color
+        done_color = tuple(round(c * DONE_SHADE) for c in color)
+        title_lines = wrap(title, font, avail) if title else []
+        rows = [(done, wrap(text, font, max(1, avail - box - gap))) for done, text in items]
+        height = (len(title_lines) + sum(len(lines) for _, lines in rows)) * line_h - (line_h - size)
+        align = args.todo_align
+        edge = max(2, size // 10)
+
+        def draw(top):
+            out, y = [], top
+            for line in title_lines:
+                out.append((line, font, align_x[align], y, ALIGN[align], color))
+                y += line_h
+            for done, lines in rows:
+                row_w = box + gap + max(font.getlength(line) for line in lines)
+                x0 = (self.col_left if align == "left" else
+                      self.col_right - row_w if align == "right" else self.w / 2 - row_w / 2)
+                x0 = round(x0)
+                by = y + round(cap_mid - box / 2)
+                out.append(Shape("box", (x0, by, x0 + box, by + box), color, edge, radius=2))
+                if done:
+                    out.append(Shape("line", [(x0 + box * 0.2, by + box * 0.52),
+                                              (x0 + box * 0.43, by + box * 0.76),
+                                              (x0 + box * 0.82, by + box * 0.24)],
+                                     color, max(2, size // 8)))
+                tx = x0 + box + gap
+                for j, line in enumerate(lines):
+                    ly = y + j * line_h
+                    out.append((line, font, tx, ly, "la", done_color if done else color))
+                    if done and line:
+                        mid = ly + round(small_mid)
+                        out.append(Shape("line", [(tx, mid), (tx + font.getlength(line), mid)],
+                                         done_color, max(1, size // 12)))
+                y += len(lines) * line_h
+            return out
+
+        return height, draw, None
 
     def clock(self):
         """The clock and date strings for right now."""
@@ -797,10 +1164,39 @@ class Layout:
         return " / ".join(parts)
 
 
+def parse_todo(text):
+    """--todo-item "[x] Call mum" -> (True, "Call mum"); "[ ] ..." or no
+    box at all is not done yet."""
+    stripped = text.strip()
+    if stripped[:3].lower() == "[x]":
+        return True, stripped[3:].strip()
+    if stripped[:3] == "[ ]":
+        return False, stripped[3:].strip()
+    return False, stripped
+
+
 def _fraction(text):
     value = float(text)
     if not 0 <= value <= 1:
         raise argparse.ArgumentTypeError(f"{text} is not between 0 and 1")
+    return value
+
+
+def _when(text):
+    """A countdown's date: YYYY-MM-DD, optionally with a time (THH:MM)."""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(text.strip(), fmt)
+        except ValueError:
+            pass
+    raise argparse.ArgumentTypeError(f"{text!r} is not a date like 2026-12-25 "
+                                     "or 2026-12-25T18:30")
+
+
+def _brightness(text):
+    value = int(text)
+    if not 10 <= value <= 100:
+        raise argparse.ArgumentTypeError(f"{text} is not between 10 and 100")
     return value
 
 
@@ -890,6 +1286,40 @@ def build_parser():
     ap.add_argument("--sample-stats", action="store_true",
                     help="with --preview: show example readings instead of "
                          "this PC's, without loading any sensors")
+    ap.add_argument("--calendar", choices=("month", "week"),
+                    help="a calendar in the clock block, under the date (or in "
+                         "its place, with --no-date): this month, or this week")
+    ap.add_argument("--week-start", choices=("mon", "sun"), default="mon",
+                    help="the calendar's first weekday (default mon)")
+    ap.add_argument("--calendar-size", type=int, default=0)
+    ap.add_argument("--calendar-color", type=ImageColor.getrgb, default="white")
+    ap.add_argument("--note-line", action="append", default=[], metavar="TEXT",
+                    help="a line of your own text; repeat for more lines. Long "
+                         "lines wrap")
+    ap.add_argument("--countdown-date", type=_when, metavar="YYYY-MM-DD[THH:MM]",
+                    help="show a countdown to (or count up from) this date")
+    ap.add_argument("--countdown-mode", choices=COUNTDOWN_MODES, default="to",
+                    help="to (days to the date), to-hours (days and hours) or "
+                         "since (days since it); default to")
+    ap.add_argument("--countdown-label", default="", metavar="TEXT",
+                    help='what it counts to, e.g. "Launch" -> "12 days to Launch"')
+    ap.add_argument("--todo-title", default="", metavar="TEXT",
+                    help="a heading over the to-do list")
+    ap.add_argument("--todo-item", action="append", default=[], metavar="TEXT",
+                    help='a to-do item; start it with "[x] " when it is done. '
+                         "Repeat for more")
+    for block, align in (("note", "center"), ("countdown", "center"), ("todo", "left")):
+        ap.add_argument(f"--{block}-size", type=int, default=0)
+        ap.add_argument(f"--{block}-color", type=ImageColor.getrgb, default="white")
+        ap.add_argument(f"--{block}-align", choices=ALIGN, default=align)
+        ap.add_argument(f"--{block}-pos", type=_fraction,
+                        help=f"height of the {block} block, 0 (top) to 1 (bottom); "
+                             "default: stacked under the clock")
+        ap.add_argument(f"--{block}-no-frost", action="store_true",
+                        help=f"no frosted panel behind the {block} block")
+    ap.add_argument("--brightness", type=_brightness, default=100, metavar="10-100",
+                    help="dim the whole screen to this percentage (default 100); "
+                         "the pixels are darkened, the backlight stays as it is")
     ap.add_argument("--no-frost", action="store_true",
                     help="no blurred panel behind the text")
     ap.add_argument("--frost-blur", type=float, default=9.0)
@@ -966,121 +1396,62 @@ def preview(argv, picture=None):
     rows, labels = _stats_setup(args)
     layout = Layout(args, frame.width, frame.height, rows, labels)
     stats = SampleMetrics([name for row in rows for name in row])
-    img = compose(frame, layout.items(layout.clock(), stats.values()), layout.panels,
-                  args.frost_blur, args.frost_dark, args.frost_corner)
-    return img, layout
+    img = compose(frame, layout.static + layout.items(layout.clock(), stats.values()),
+                  layout.panels, args.frost_blur, args.frost_dark, args.frost_corner)
+    return dim(img, args.brightness), layout
 
 
-def main(argv=None, stop=None, log=None):
-    """Run the clock until stopped.
+class Show:
+    """One set of options, made ready to stream: the frames (prepared and
+    packed), the layout and the readings.
 
-    From the command line this parses sys.argv and runs until Ctrl+C. The
-    service calls it with its own `argv`, a threading.Event as `stop`, and a
-    `log` function; it then returns once `stop` is set, with the port closed.
-    Errors still end it with SystemExit(message), which the service catches.
+    Building one takes a second or two for a GIF, so a change of settings
+    builds the new Show while the old one keeps playing (Player.swap).
+    `get_temps` lets the service share one Temperatures between Shows.
     """
-    log = log or (lambda message: print(message, flush=True))
-    args = build_parser().parse_args(argv)
 
-    if args.preview:
-        frames = _frames(args, limit=1)
-        w, h = frames[0].size
-    else:
+    def __init__(self, args, log, get_temps=None):
         w, h = _panel_size(args)
-    if w * h > MAX_PIXELS:
-        sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
-
-    rows, labels = _stats_setup(args)
-    layout = Layout(args, w, h, rows, labels)
-    if not args.preview:
-        # Each frame is frosted, flipped and packed as it loads (see prepare).
-        frames = _frames(args, each=lambda frame: prepare(frame, layout.panels, args))
+        if w * h > MAX_PIXELS:
+            sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
+        rows, labels = _stats_setup(args)
+        self.args, self.size = args, (w, h)
+        self.layout = layout = Layout(args, w, h, rows, labels)
+        # Each frame is frosted, given the static blocks, flipped and packed as
+        # it loads (see prepare).
+        frames = _frames(args, each=lambda frame: prepare(frame, layout, args))
         if len(frames) == 1:
             frames = [unpack(frames[0], (w, h))]    # a still picture: nothing to save
-    slots = [name for row in rows for name in row]
-    if not slots:
-        stats = None
-    elif args.preview and args.sample_stats:
-        stats = SampleMetrics(slots)
-    else:
-        stats = Metrics(slots)
-    temps = stats.temps if stats else None
-    if temps:
-        log(temps.status())
+        self.frames = frames
+        self.slots = [name for row in rows for name in row]
+        self.stats = Metrics(self.slots, get_temps=get_temps) if self.slots else None
+        if self.stats and self.stats.temps:
+            log(self.stats.temps.status())
+        self.header = struct.pack("<IHHHH", MAGIC, w, h, 0, 1)
+        self.valid_until = layout.valid_until
 
-    def tick():
+    def tick(self):
         """The clock strings and stat values for right now."""
-        return layout.clock(), stats.values() if stats else ()
+        return self.layout.clock(), self.stats.values() if self.stats else ()
 
-    if args.preview:
-        try:
-            if isinstance(stats, Metrics):
-                # Prime, wait, then force a fresh sample: CPU load and the
-                # throughput slots are deltas and read as 0 or "--" until
-                # there are two samples to subtract.
-                stats.values()
-                time.sleep(0.6)
-                stats.refresh()
-            clock, vals = tick()
-            compose(frames[0], layout.items(clock, vals), layout.panels,
-                    args.frost_blur, args.frost_dark, args.frost_corner).save(args.preview)
-        finally:
-            if temps:
-                temps.close()
-        following = (f", following {stats.nic()}" if stats
-                     and any(s.startswith("net") for s in slots) else "")
-        log(f"preview written to {args.preview} ({w}x{h}), {layout.describe()}"
-            f"{following} -- panel untouched")
-        return
+    def describe(self, port):
+        """The line logged when it starts playing (the service reads " on ")."""
+        w, h = self.size
+        layout = self.layout
+        return (f"{len(self.frames)} frames at {w}x{h} ({w * h:,} px), "
+                f"{self.args.fps:g} FPS, on {port}, "
+                f"font {os.path.basename(layout.font_path)}, {layout.describe()}"
+                + ("" if self.stats is None else
+                   f", slots {'/'.join(self.slots)} at y={layout.stats_y} "
+                   f"(labels {layout.label_font.size}px, values {layout.value_font.size}px)"))
 
-    header = struct.pack("<IHHHH", MAGIC, w, h, 0, 1)
-    try:
-        panel = Panel(args.port)
-    except BaseException:
-        if temps:
-            temps.close()
-        raise
-    if stop is None:
-        # Command line only: signal handlers can only be set from the main
-        # thread, and the service stops the loop through `stop` instead.
-        atexit.register(panel.close)
-        install_handlers()
-    log(f"{len(frames)} frames at {w}x{h} ({w * h:,} px), {args.fps:g} FPS, "
-        f"on {panel.port}, font {os.path.basename(layout.font_path)}, "
-        f"{layout.describe()}"
-        + ("" if stats is None else
-           f", slots {'/'.join(slots)} at y={layout.stats_y} "
-           f"(labels {layout.label_font.size}px, values {layout.value_font.size}px)"))
-    try:
-        _stream(panel, header, frames, (w, h), tick, layout.items, args, stop)
-    finally:
-        panel.close()
-        if temps:
-            temps.close()
+    def close(self):
+        if self.stats:
+            self.stats.close()
 
 
-def prepare(frame, panels, args):
-    """One frame made ready for the loop, once: frosted, turned upside down
-    and packed.
-
-    Neither the frost nor the flip depends on the text, so doing them here
-    rather than on every redraw roughly halves the loop's CPU time.
-
-    Packing is zlib, which is lossless: the rooftop GIF's 59 frames take 80 MB
-    as they are and under 9 MB packed (a 300-frame GIF, over 400 MB), for
-    about 2.5 ms of unpacking per frame sent.
-    """
-    img = compose(frame, [], panels, args.frost_blur, args.frost_dark,
-                  args.frost_corner).transpose(Image.ROTATE_180)
-    return zlib.compress(img.tobytes(), 1)
-
-
-def unpack(data, size):
-    return Image.frombytes("RGB", size, zlib.decompress(data))
-
-
-def _stream(panel, header, frames, size, tick, build_items, args, stop):
-    """Send prepared frames forever, or until `stop` is set.
+class Player:
+    """Sends a Show's frames to the panel until stopped.
 
     This runs all day, so it does as little as it can: the text is drawn once
     each time it changes (text_bands) rather than onto every frame, and each
@@ -1088,30 +1459,158 @@ def _stream(panel, header, frames, size, tick, build_items, args, stop):
     can never be sent again, so they are dropped at once rather than held --
     with stats changing every 2 seconds, a long GIF would otherwise keep a
     JPEG of every frame for nothing.
-    """
-    cache = {}
-    shown, bands = None, []
-    period = 1.0 / args.fps
-    i = 0
-    while stop is None or not stop.is_set():
-        start = time.time()
-        clock, vals = tick()
-        stamp = clock + vals
-        if stamp != shown:
-            shown, bands = stamp, text_bands(build_items(clock, vals), size)
-            cache.clear()
 
-        idx = i % len(frames)
-        payload = cache.get(idx)
-        if payload is None:
-            payload = cache[idx] = header + encode_with(frames[idx], size, bands, args.quality)
-        panel.send(payload)
-        i += 1
-        wait = max(0, period - (time.time() - start))
-        if stop is None:
-            time.sleep(wait)
-        else:
-            stop.wait(wait)
+    swap() hands over a new Show, built elsewhere; the old one plays until
+    then, so changing settings never freezes the screen. When the Show's
+    static blocks go out of date (the calendar at midnight, a countdown),
+    `on_stale` is called once, to build a fresh Show and swap it in.
+    """
+
+    def __init__(self, panel, show, on_stale=None):
+        self.panel, self.show, self.on_stale = panel, show, on_stale
+        self._next = None
+
+    def swap(self, show):
+        self._next = show
+
+    def run(self, stop=None):
+        cache = {}
+        shown, bands = None, []
+        stale_reported = False
+        show = self.show
+        i = 0
+        while stop is None or not stop.is_set():
+            start = time.time()
+            if self._next is not None:
+                old, show, self._next = show, self._next, None
+                self.show = show
+                old.close()
+                cache.clear()
+                shown, stale_reported = None, False
+            if show.valid_until and not stale_reported and start >= show.valid_until:
+                stale_reported = True
+                if self.on_stale:
+                    self.on_stale()
+            clock, vals = show.tick()
+            stamp = clock + vals
+            if stamp != shown:
+                shown, bands = stamp, text_bands(show.layout.items(clock, vals),
+                                                 show.size, show.args.brightness)
+                cache.clear()
+
+            idx = i % len(show.frames)
+            payload = cache.get(idx)
+            if payload is None:
+                payload = cache[idx] = show.header + encode_with(
+                    show.frames[idx], show.size, bands, show.args.quality)
+            self.panel.send(payload)
+            i += 1
+            wait = max(0, 1.0 / show.args.fps - (time.time() - start))
+            if stop is None:
+                time.sleep(wait)
+            else:
+                stop.wait(wait)
+
+
+def main(argv=None, stop=None, log=None):
+    """Run the clock until stopped.
+
+    From the command line this parses sys.argv and runs until Ctrl+C.
+    Errors end it with SystemExit(message). (The service drives Show and
+    Player itself, so that it can swap settings without a pause.)
+    """
+    log = log or (lambda message: print(message, flush=True))
+    args = build_parser().parse_args(argv)
+
+    if args.preview:
+        _write_preview(args, log)
+        return
+
+    show = Show(args, log)
+    try:
+        panel = Panel(args.port)
+    except BaseException:
+        show.close()
+        raise
+    if stop is None:
+        # Command line only: signal handlers can only be set from the main
+        # thread; the service stops the loop through `stop` instead.
+        atexit.register(panel.close)
+        install_handlers()
+    log(show.describe(panel.port))
+
+    def rebuild():
+        """At midnight (or a countdown's next change): fresh static blocks."""
+        def build():
+            try:
+                player.swap(Show(args, log))
+            except (SystemExit, Exception) as e:
+                log(f"could not refresh the blocks: {e}")
+        threading.Thread(target=build, name="rebuild", daemon=True).start()
+
+    player = Player(panel, show, on_stale=rebuild)
+    try:
+        player.run(stop)
+    finally:
+        panel.close()
+        player.show.close()
+
+
+def _write_preview(args, log):
+    """--preview: one frame to a PNG, with this PC's readings (or examples)."""
+    frames = _frames(args, limit=1)
+    w, h = frames[0].size
+    if w * h > MAX_PIXELS:
+        sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
+    rows, labels = _stats_setup(args)
+    layout = Layout(args, w, h, rows, labels)
+    slots = [name for row in rows for name in row]
+    stats = (None if not slots else
+             SampleMetrics(slots) if args.sample_stats else Metrics(slots))
+    try:
+        if stats and stats.temps:
+            log(stats.temps.status())
+        if isinstance(stats, Metrics):
+            # Prime, wait, then force a fresh sample: CPU load and the
+            # throughput slots are deltas and read as 0 or "--" until
+            # there are two samples to subtract.
+            stats.values()
+            time.sleep(0.6)
+            stats.refresh()
+        vals = stats.values() if stats else ()
+        dim(compose(frames[0], layout.static + layout.items(layout.clock(), vals),
+                    layout.panels, args.frost_blur, args.frost_dark, args.frost_corner),
+            args.brightness).save(args.preview)
+    finally:
+        if stats:
+            stats.close()
+    following = (f", following {stats.nic()}" if stats
+                 and any(s.startswith("net") for s in slots) else "")
+    log(f"preview written to {args.preview} ({w}x{h}), {layout.describe()}"
+        f"{following} -- panel untouched")
+
+
+def prepare(frame, layout, args):
+    """One frame made ready for the loop, once: frosted, given the static
+    blocks (text, countdown, to-do list, calendar), dimmed, turned upside
+    down and packed.
+
+    None of that depends on the changing text, so doing it here rather than
+    on every redraw roughly halves the loop's CPU time, and the static blocks
+    cost nothing at all once the frames are made.
+
+    Packing is zlib, which is lossless: the rooftop GIF's 59 frames take 80 MB
+    as they are and under 9 MB packed (a 300-frame GIF, over 400 MB), for
+    about 2.5 ms of unpacking per frame sent.
+    """
+    img = compose(frame, layout.static, layout.panels, args.frost_blur,
+                  args.frost_dark, args.frost_corner)
+    img = dim(img, args.brightness).transpose(Image.ROTATE_180)
+    return zlib.compress(img.tobytes(), 1)
+
+
+def unpack(data, size):
+    return Image.frombytes("RGB", size, zlib.decompress(data))
 
 
 if __name__ == "__main__":

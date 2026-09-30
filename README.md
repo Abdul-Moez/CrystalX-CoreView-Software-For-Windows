@@ -110,8 +110,24 @@ Below it are five tabs:
   - **One per row** gives each reading its own line with much bigger numbers.
   - Size sliders and colours for the names and the numbers, and **Height on
     screen** (or drag the block in the preview).
-- **Style** — the **font**, chosen from every font installed on the PC, each
-  shown in its own style. And the **frosted panel** behind the text: how dark
+- **Extras** — blocks of your own, each switched on separately, with its own
+  size, colour, alignment (left, centre or right), frosted panel on or off and
+  height on the screen (or drag it in the preview):
+  - **Text** — anything you like: a quote, a reminder, your name. Long lines
+    wrap.
+  - **Countdown** — days to a date (*12 days to Launch*, then *Launch is
+    today!*), days and hours to a date and time, or days since a date (*214
+    days since I quit*).
+  - **To-do list** — with an optional title. Ticked items are crossed out and
+    dimmed. **Ticking and removing items show on the screen straight away**;
+    new or edited items show when you click Apply. Double-click an item to
+    edit it.
+  - **Calendar** — this month or just this week, under the date or instead
+    of it, with the week starting on Monday or Sunday. Today is marked.
+- **Style** — **Brightness** dims the whole screen, from 100% down to 10%.
+  (The case screen's own backlight can't be changed by any software, so this
+  darkens the picture itself.) The **font**, chosen from every font installed
+  on the PC, each shown in its own style. And the **frosted panel** behind the text: how dark
   and how blurred, or off.
 - **Options**
   - **Start display with Windows** decides whether the clock comes on by
@@ -119,7 +135,12 @@ Below it are five tabs:
   - **Saved layouts**: **Save as…** keeps everything on the screen, the
     picture too, under a name. **Load** brings it back. Up to 10.
 
-**Reset to defaults** puts everything back as it came, but keeps your picture.
+Applying never interrupts the screen: it keeps showing the old look for the
+second or two the new one takes to prepare, then switches.
+
+**Reset to defaults** puts the look back as it came, but keeps your picture and
+what you wrote (the text, the countdown and the to-do list — their blocks are
+just switched off).
 **Undo changes** goes back to what's on the screen now.
 
 **Open log** shows what the app has been doing — useful if something goes
