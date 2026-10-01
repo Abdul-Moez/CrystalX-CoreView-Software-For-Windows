@@ -4,6 +4,10 @@ pyserial==3.5
 psutil==7.2.2
 pywin32==312
 
+# Video: PyAV carries FFmpeg, which reads the videos you choose and plays the
+# converted clip. It is only loaded when a video is used.
+av==19.0.0
+
 # Temperatures: pythonnet loads LibreHardwareMonitor (lib/LibreHardwareMonitor).
 # The last three are what pythonnet itself needs, pinned too.
 pythonnet==3.1.0

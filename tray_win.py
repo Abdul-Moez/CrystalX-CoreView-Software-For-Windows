@@ -24,11 +24,16 @@
 
 Runs as the signed-in user, without admin rights, and controls the service
 (service_win.py). Everything lives in the main window: status and start/stop,
-then tabs for the picture (fill or fit, drag and zoom), the clock and date,
-the stats, the font and frosted panel, and options (start with Windows,
-saved layouts). The preview beside them is drawn by the engine itself. The
-tray icon only has Show and Quit; clicking it opens the window, and closing
-the window hides it back to the tray.
+then tabs for the picture (a playlist of pictures, GIFs and videos, each
+filled or fitted, dragged and zoomed), the clock and date, the stats, the
+extras (text, countdown, to-do list, calendar), the style (brightness, font,
+frosted panel) and options (start with Windows, saved layouts and rotating
+them). The preview beside them is drawn by the engine itself. The tray icon
+only has Show and Quit; clicking it opens the window, and closing the window
+hides it back to the tray.
+
+A video is converted when it is applied (video_win), by a helper process: the
+same program started with "--video-worker". The window never loads FFmpeg.
 
   Start / Stop / Quit   start or stop the service through Windows' service
                         manager. Stopped, the screen is free for other apps.
@@ -41,18 +46,21 @@ the window hides it back to the tray.
   CrystalXLCD.exe --hidden   start in the tray only (at login)
 """
 
-import base64
 import copy
 import ctypes
 import datetime
 import json
 import os
 import queue
+import shutil
 import sys
+import tempfile
 import threading
+import time
 import webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
+from io import BytesIO
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 import pywintypes
@@ -66,30 +74,38 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import clock_win
 import ipc_win
+import video_win
 from clock_win import MAX_SPOTS, SLOTS, countdown_text, date_strftime
-from ipc_win import (DEFAULT_PICTURE, DISPLAY_NAME, LOG_FILE, MAX_FRAMES,
-                     MAX_PICTURE_BYTES, SERVICE_NAME, VERSION, app_dir)
+from ipc_win import (DISPLAY_NAME, LOG_FILE, MAX_FRAMES, MAX_PICTURE_BYTES,
+                     SERVICE_NAME, VERSION, app_dir)
 from lcd_win import FIT_SIZE, MAX_ZOOM, fit_geometry
-from settings_win import (DEFAULT_FONT, DEFAULT_LOOK, EXTRA_BLOCKS, FONT_TYPES,
-                          FONTS_DIR, MAX_COUNTDOWN_LABEL, MAX_DATE_PATTERN,
-                          MAX_LABEL, MAX_LAYOUT_NAME, MAX_LAYOUTS, MAX_NOTE,
-                          MAX_NOTE_LINES, MAX_TODO_ITEMS, MAX_TODO_TEXT,
-                          clean_look, engine_argv, list_layouts, load_config,
-                          picture_path)
+from settings_win import (DEFAULT_FILE, DEFAULT_FONT, DEFAULT_LOOK, DEFAULT_ROTATION,
+                          EXTRA_BLOCKS, FONT_TYPES, FONTS_DIR, FRAMING,
+                          MAX_COUNTDOWN_LABEL, MAX_DATE_PATTERN, MAX_ITEMS, MAX_LABEL,
+                          MAX_LAYOUT_NAME, MAX_LAYOUTS, MAX_NOTE, MAX_NOTE_LINES,
+                          MAX_TODO_ITEMS, MAX_TODO_TEXT, PLAYS, ROTATION_MINUTES,
+                          STILL_SECONDS, clean_look, engine_argv, item_path,
+                          list_layouts, load_config, new_item)
 
 AUTHOR = "Abdul Moez"
 GITHUB = "https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows"
 ICON = os.path.join(app_dir(), "assets", "crystalx-lcd.ico")
-DEFAULT_PICTURE_PATH = os.path.join(app_dir(), DEFAULT_PICTURE)
-DEFAULT_PICTURE_NAME = "Default (rooftop GIF)"
 PICTURE_FORMATS = ("GIF", "PNG", "JPEG", "WEBP", "BMP")
-PICTURE_TYPES = [("Pictures", "*.gif *.png *.jpg *.jpeg *.webp *.bmp"),
-                 ("All files", "*.*")]
+_PICTURES = "*.gif *.png *.jpg *.jpeg *.webp *.bmp"
+_VIDEOS = "*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.wmv *.flv *.mpg *.mpeg *.ts *.3gp"
+FILE_TYPES = [("Pictures and videos", f"{_PICTURES} {_VIDEOS}"), ("Pictures", _PICTURES),
+              ("Videos", _VIDEOS), ("All files", "*.*")]
 POLL_SECONDS = 3
-PREVIEW_SCALE = 0.45
+PREVIEW_SCALE = 0.43            # with the play controls under it, the window's old height
 # The preview scales bigger photos down to this before placing them: plenty
 # for a preview under half the panel's size, even zoomed in.
 PREVIEW_SOURCE_LIMIT = 2048
+# While the preview plays a video it is drawn from pictures this size, ten
+# times a second; paused, from what the conversion itself will use.
+PLAY_SOURCE_LIMIT = 960
+PLAY_INTERVAL_MS = 100
+# What a playlist item carries in the window only, until it is applied.
+WINDOW_KEYS = ("path", "pending", "source_fps", "hdr")
 WRAP = 300                      # width of wrapped text on the right, in px
 PREVIEW_HINT = "Drag to move - scroll to zoom"
 OVERLAP_HINT = "Some blocks overlap"
@@ -123,9 +139,11 @@ COUNTDOWN_CHOICES = [("to", "Days to a date"), ("to-hours", "Days and hours to a
 BLOCK_NAMES = {"clock": "clock", "stats": "stats", "note": "text",
                "countdown": "countdown", "todo": "to-do list"}
 BOX, TICKED = "\u2610", "\u2611"            # the to-do list's boxes in the window
-# What the user wrote, which Reset to defaults keeps.
+# What the user wrote or chose, which Reset to defaults keeps: the text,
+# countdown and to-do list, and the playlist of pictures.
 CONTENT_KEYS = ("note_text", "countdown_mode", "countdown_date", "countdown_time",
-                "countdown_label", "todo_title", "todo_items")
+                "countdown_label", "todo_title", "todo_items",
+                "playlist", "playlist_shuffle")
 
 ID_SHOW, ID_QUIT = 1001, 1002
 WM_TRAY = win32con.WM_USER + 20
@@ -235,7 +253,7 @@ def read_status(settings=True):
         try:
             live = ipc_win.request("status", timeout_ms=2000)
             status.update(state=live.get("state"), detail=live.get("detail"),
-                          temps=live.get("temps"))
+                          temps=live.get("temps"), playing=live.get("playing"))
         except ConnectionError:
             status["state"] = "starting"
     return status
@@ -260,6 +278,10 @@ def describe(status):
         return "Stopped - the screen is free for other apps", GREY
     state = status.get("state")
     if state == "showing":
+        playing = status.get("playing") or {}
+        if playing.get("count", 1) > 1:     # a playlist: say where it is
+            return (f"Showing on {status.get('detail')} - item "
+                    f"{playing.get('position')} of {playing['count']}"), GREEN
         return f"Showing on {status.get('detail')}", GREEN
     if state == "waiting":
         return f"Waiting: {status.get('detail')}", AMBER
@@ -276,22 +298,35 @@ def temps_problem(status):
     return None
 
 
-def check_picture_file(path):
-    """The same checks the service makes, so problems show up before sending."""
-    size = os.path.getsize(path)
-    if size > MAX_PICTURE_BYTES:
-        raise ValueError(f"The file is {size / 2**20:.0f} MB; the limit is "
-                         f"{MAX_PICTURE_BYTES // 2**20} MB.")
+def check_media_file(path, probe):
+    """What the file at `path` is, after the checks the service would make, so
+    a problem shows up before anything is sent: ("picture", info) for a
+    picture or GIF, ("video", info) for a video (info as video_win.probe).
+    `probe(path)` looks at a video; the window's asks its helper process, so
+    that FFmpeg is never loaded into the window itself.
+    Raises ValueError with a message for the person."""
     try:
         with Image.open(path) as img:
-            kind, frames = img.format, getattr(img, "n_frames", 1)
-    except Exception as e:
-        raise ValueError("That file is not a picture this app can show.") from e
-    if kind not in PICTURE_FORMATS:
-        raise ValueError(f"{kind} pictures are not supported. Use GIF, PNG, "
-                         "JPEG, WEBP or BMP.")
-    if frames > MAX_FRAMES:
-        raise ValueError(f"The GIF has {frames} frames; the limit is {MAX_FRAMES}.")
+            kind, frames, size = img.format, getattr(img, "n_frames", 1), img.size
+    except Exception:
+        kind = None
+    if kind is not None:
+        file_size = os.path.getsize(path)
+        if file_size > MAX_PICTURE_BYTES:
+            raise ValueError(f"The file is {file_size / 2**20:.0f} MB; the limit for "
+                             f"a picture is {MAX_PICTURE_BYTES // 2**20} MB.")
+        if kind not in PICTURE_FORMATS:
+            raise ValueError(f"{kind} pictures are not supported. Use GIF, PNG, "
+                             "JPEG, WEBP or BMP.")
+        if frames > MAX_FRAMES:
+            raise ValueError(f"The GIF has {frames} frames; the limit is {MAX_FRAMES}.")
+        return "picture", {"width": size[0], "height": size[1], "frames": frames}
+    try:
+        return "video", probe(path)
+    except video_win.NotAVideo:
+        raise ValueError("That file is not a picture or video this app can show.") from None
+    except video_win.VideoError as e:
+        raise ValueError(str(e)) from None
 
 
 # -- the notification-area icon (its own thread and message loop) -------------
@@ -642,9 +677,21 @@ class MainWindow:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self.look = clean_look({})
-        self.chosen = None                  # a new file the user picked
-        self.use_default = False
-        self._current = DEFAULT_PICTURE_PATH
+        # The playlist item being shown in the preview and edited on the
+        # Picture tab. Besides its settings (settings_win.new_item), an item
+        # that has not been applied yet carries, for the window only: "path",
+        # the file that was picked, and "pending", "picture" or "video".
+        self.sel = 0
+        self._sources = {}                  # a converted clip -> its video (see _source_of)
+        self._positions = {}                # item id -> where its preview is, 0 to 1
+        self._media = {}                    # file -> what it is (see _media_info)
+        self._frame = (None, None, None)    # (key, picture, original size): the preview's
+        self._gif = None                    # (path, open image): a GIF being stepped through
+        self._worker = None                 # the helper process that reads videos
+        self._play_from = None              # (clock time, position) while the preview plays
+        self._play_timer = None             # the pending call that moves it on
+        self._cancel = None                # set to stop a conversion or upload under way
+        self._progress = None               # the progress window, while one is open
         # `dirty` means the user changed something that has not been applied
         # yet, so status updates must not overwrite it.
         self.dirty = False
@@ -655,8 +702,8 @@ class MainWindow:
         self._layouts = None
         self._rendering = self._want_render = False
         self._layout = None                 # the last preview's clock_win.Layout
-        self._raw = (None, None, None)      # (path, first frame, original size)
-        self._raw_size = None
+        self._raw_size = None               # the size of the picture the preview placed
+        self._placed = False                # that picture was placed already (a clip's)
         self._drag = None
         self._custom_date = False           # "Custom pattern" chosen for the date
         self._controls_key = None           # what _update_controls last acted on
@@ -666,8 +713,10 @@ class MainWindow:
         self._status_key = None             # what refresh last showed
         self.visible = False
         self.fonts = FontCatalog()
-        self.picture_name = tk.StringVar(value="")
         self.autostart = tk.BooleanVar(value=False)
+        self.rotate = tk.BooleanVar(value=False)
+        self.rotate_minutes = tk.StringVar(value=str(DEFAULT_ROTATION["minutes"]))
+        self._rotation = dict(DEFAULT_ROTATION)     # what the service has
         self.status_text = tk.StringVar(value="Checking...")
         self.note_text = tk.StringVar(value="")
         self._build()
@@ -701,7 +750,22 @@ class MainWindow:
         self.canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
         self.canvas.bind("<Motion>", self._hover)
         self.canvas.bind("<MouseWheel>", self._wheel)
-        ttk.Label(left, text="Example readings", style="Hint.TLabel").pack(pady=(6, 0))
+        # A GIF or video can be looked at anywhere along its length, and
+        # played. Nothing plays by itself: playing costs a good part of a
+        # processor core, which the open window otherwise never does.
+        bar = ttk.Frame(left)
+        bar.pack(fill="x", pady=(6, 0))
+        self.play_btn = ttk.Button(bar, text="Play", width=6, command=self.toggle_play)
+        self.play_btn.pack(side="left")
+        self.seek_var = tk.DoubleVar(value=0.0)
+        self.seek = ttk.Scale(bar, from_=0.0, to=1.0, variable=self.seek_var,
+                              command=self._seeked)
+        self.seek.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        line = ttk.Frame(left)
+        line.pack(fill="x", pady=(6, 0))
+        ttk.Label(line, text="Example readings", style="Hint.TLabel").pack(side="left")
+        self.seek_text = ttk.Label(line, style="Hint.TLabel", anchor="e")
+        self.seek_text.pack(side="right")
         # The hint line doubles as the overlap warning. It is wider than the
         # preview, so its box is sized for the longer of the two texts:
         # otherwise the whole window changed width each time it switched.
@@ -771,28 +835,48 @@ class MainWindow:
         return tab
 
     def _build_picture_tab(self):
+        """The playlist -- pictures, GIFs and videos, shown one after the other
+        -- and, under it, how the one picked in the list is placed and for how
+        long it shows. With a single item, it is simply the picture."""
         tab = self._tab("Picture")
-        ttk.Label(tab, textvariable=self.picture_name, wraplength=WRAP).pack(anchor="w")
-        row = ttk.Frame(tab)
-        row.pack(anchor="w", pady=(6, 6))
-        self.choose_btn = ttk.Button(row, text="Choose file...", command=self.choose)
-        self.choose_btn.pack(side="left")
-        self.default_btn = ttk.Button(row, text="Use default", command=self.pick_default)
-        self.default_btn.pack(side="left", padx=6)
+        top = ttk.Frame(tab)
+        top.pack(fill="x")
+        self.items_list = tk.Listbox(top, height=5, activestyle="none", exportselection=False)
+        self.items_list.pack(side="left", fill="both", expand=True)
+        self.items_list.bind("<<ListboxSelect>>", lambda e: self._item_picked())
+        side = ttk.Frame(top)
+        side.pack(side="left", padx=(6, 0))
+        self.add_btn = ttk.Button(side, text="Add...", width=11, command=self.add_files)
+        self.add_default_btn = ttk.Button(side, text="Add default", width=11,
+                                          command=self.add_default)
+        self.remove_btn = ttk.Button(side, text="Remove", width=11, command=self.remove_item)
+        for button in (self.add_btn, self.add_default_btn, self.remove_btn):
+            button.pack(pady=(0, 2))
+        order = ttk.Frame(side)
+        order.pack()
+        self.up_btn = ttk.Button(order, text="Up", width=5, command=lambda: self.move_item(-1))
+        self.up_btn.pack(side="left")
+        self.down_btn = ttk.Button(order, text="Down", width=5, command=lambda: self.move_item(1))
+        self.down_btn.pack(side="left")
+        self.shuffle = tk.BooleanVar()
+        self.shuffle_check = ttk.Checkbutton(
+            tab, text="Shuffle the order", variable=self.shuffle,
+            command=lambda: self._set("playlist_shuffle", self.shuffle.get()))
+        self.shuffle_check.pack(anchor="w", pady=(4, 0))
+
         self.picture_info = self._fixed_label(tab, 2, WRAP, style="Hint.TLabel",
-                                              wraplength=WRAP, justify="left")
-        # For anyone making a picture to fit the gap between the text blocks.
-        self.space_info = self._fixed_label(tab, 2, WRAP, style="Hint.TLabel",
-                                            justify="left")
-        self.picture_warn = self._fixed_label(tab, 2, WRAP, style="Note.TLabel",
                                               wraplength=WRAP, justify="left")
 
         self.mode = tk.StringVar(value="fill")
         self.edge = tk.StringVar(value="blur")
-        ttk.Radiobutton(tab, text="Fill - crop to cover the whole screen", variable=self.mode,
-                        value="fill", command=self._fit_changed).pack(anchor="w", pady=(10, 0))
-        ttk.Radiobutton(tab, text="Fit - show the whole picture", variable=self.mode,
-                        value="fit", command=self._fit_changed).pack(anchor="w")
+        self.fill_radio = ttk.Radiobutton(
+            tab, text="Fill - crop to cover the whole screen", variable=self.mode,
+            value="fill", command=self._fit_changed)
+        self.fill_radio.pack(anchor="w", pady=(6, 0))
+        self.fit_radio = ttk.Radiobutton(
+            tab, text="Fit - show the whole picture", variable=self.mode,
+            value="fit", command=self._fit_changed)
+        self.fit_radio.pack(anchor="w")
         sub = ttk.Frame(tab)
         sub.pack(anchor="w", padx=(22, 0))
         self.blur_radio = ttk.Radiobutton(sub, text="Blurred edges", variable=self.edge,
@@ -801,19 +885,43 @@ class MainWindow:
         self.color_radio = ttk.Radiobutton(sub, text="Solid colour", variable=self.edge,
                                            value="color", command=self._fit_changed)
         self.color_radio.grid(row=1, column=0, sticky="w")
-        self.fit_swatch = Swatch(sub, "Edge colour", lambda c: self._set("fit_color", c))
+        self.fit_swatch = Swatch(sub, "Edge colour", lambda c: self._set_item("fit_color", c))
         self.fit_swatch.grid(row=1, column=1, padx=8)
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(12, 0))
+        row.pack(fill="x", pady=(8, 0))
         ttk.Label(row, text="Zoom", width=6).pack(side="left")
         self.zoom = Slider(row, 1.0, MAX_ZOOM, lambda v: f"{v * 100:.0f}%",
-                           lambda v: self._set("zoom", round(v, 3)))
+                           lambda v: self._set_item("zoom", round(v, 3)), length=120)
         self.zoom.pack(side="left")
-        ttk.Label(tab, text="Drag the preview to move the picture, and scroll on it "
-                            "to zoom.", style="Hint.TLabel", wraplength=WRAP,
-                  justify="left").pack(anchor="w", pady=(6, 0))
-        ttk.Button(tab, text="Reset position", command=self.recentre).pack(anchor="w", pady=(6, 0))
+        self.recentre_btn = ttk.Button(row, text="Reset", width=6, command=self.recentre)
+        self.recentre_btn.pack(side="left")
+
+        # How long it shows before the next one: seconds for a still picture,
+        # times through for a GIF or video.
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(8, 0))
+        self.timing_lead = ttk.Label(row, text="Show it for")
+        self.timing_lead.pack(side="left")
+        self.timing_var = tk.StringVar()
+        self.timing = ttk.Spinbox(row, width=5, from_=1, to=3600, textvariable=self.timing_var,
+                                  command=self._timing_typed)
+        self.timing.pack(side="left", padx=6)
+        self.timing_var.trace_add("write", lambda *_: self._timing_typed())
+        self.timing_unit = ttk.Label(row, text="seconds")
+        self.timing_unit.pack(side="left")
+        # One switch, for what the item is: a video's frame-rate limit, or a
+        # GIF's own speed. A still picture has neither.
+        self.item_flag = tk.BooleanVar()
+        self.item_check = ttk.Checkbutton(tab, variable=self.item_flag,
+                                          command=self._flag_changed)
+        self.item_check.pack(anchor="w", pady=(6, 0))
+
+        # For anyone making a picture to fit the gap between the text blocks.
+        self.space_info = self._fixed_label(tab, 2, WRAP, style="Hint.TLabel",
+                                            justify="left")
+        self.picture_warn = self._fixed_label(tab, 2, WRAP, style="Note.TLabel",
+                                              wraplength=WRAP, justify="left")
 
     def _build_clock_tab(self):
         tab = self._tab("Clock")
@@ -870,9 +978,14 @@ class MainWindow:
     def _build_stats_tab(self):
         tab = self._tab("Stats")
         self.show_stats = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tab, text="Show the stats", variable=self.show_stats,
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(0, 2))
+        ttk.Checkbutton(row, text="Show the stats", variable=self.show_stats,
                         command=lambda: self._set("show_stats", self.show_stats.get())
-                        ).pack(anchor="w", pady=(0, 6))
+                        ).pack(side="left")
+        # (Beside the switch, where there is room: the tab is the tallest one.)
+        self.warn_btn = ttk.Button(row, text="Warning colours...", command=self.edit_warnings)
+        self.warn_btn.pack(side="right")
         row = ttk.Frame(tab)
         row.pack(fill="x")
         self.columns = tk.IntVar(value=2)
@@ -989,9 +1102,26 @@ class MainWindow:
         self.save_btn.pack(side="left", padx=6)
         self.delete_btn = ttk.Button(row, text="Delete", command=self.delete_layout)
         self.delete_btn.pack(side="left")
-        ttk.Label(frame, text=f"A layout keeps everything on the screen, its picture "
-                              f"too. Up to {MAX_LAYOUTS}.",
+        ttk.Label(frame, text=f"A layout keeps everything on the screen, its pictures "
+                              f"and videos too. Up to {MAX_LAYOUTS}.",
                   style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(8, 0))
+        # Rotating belongs to the app, not to a layout, so it takes effect at
+        # once, like "Start display with Windows".
+        row = ttk.Frame(frame)
+        row.pack(anchor="w", pady=(8, 0))
+        self.rotate_check = ttk.Checkbutton(row, text="Change layout every", variable=self.rotate,
+                                            command=self.set_rotation)
+        self.rotate_check.pack(side="left")
+        self.rotate_spin = ttk.Spinbox(row, width=4, from_=ROTATION_MINUTES[0],
+                                       to=ROTATION_MINUTES[1], textvariable=self.rotate_minutes,
+                                       command=self.set_rotation)
+        self.rotate_spin.pack(side="left", padx=6)
+        self.rotate_spin.bind("<Return>", lambda e: self.set_rotation())
+        self.rotate_spin.bind("<FocusOut>", lambda e: self.set_rotation())
+        ttk.Label(row, text="minutes").pack(side="left")
+        ttk.Label(frame, text="Goes through the saved layouts in turn. It changes when "
+                              "the picture or video that is playing has finished.",
+                  style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_extras_tab(self):
         """Text, Countdown, To-do and Calendar, each in a tab of its own."""
@@ -1392,7 +1522,7 @@ class MainWindow:
     def changed(self):
         # Changed means different from what the screen shows: undoing a change
         # by hand counts as no change.
-        self.dirty = bool(self.chosen or self.use_default) or self.look != self._saved_look
+        self.dirty = self.look != self._saved_look
         self._show_look()
         self._update_controls()
         self.render_preview()
@@ -1402,12 +1532,7 @@ class MainWindow:
         look = self.look
         self._loading = True
         try:
-            fit = look["fit"]
-            self.mode.set("fill" if fit == "fill" else "fit")
-            if fit != "fill":
-                self.edge.set(fit)
-            self.fit_swatch.set(look["fit_color"])
-            self.zoom.set(look["zoom"])
+            self._show_playlist()
             self.show_time.set(look["show_time"])
             self.show_date.set(look["show_date"])
             self.seconds.set(look["seconds"])
@@ -1436,10 +1561,56 @@ class MainWindow:
             self.show_stats.set(look["show_stats"])
             self.frost_dark.set(look["frost_dark"])
             self.frost_blur.set(look["frost_blur"])
+            on = [slot for slot in look["warn"] if slot in look["slots"]]
+            self.warn_btn.configure(text=f"Warning colours ({len(on)})..." if on
+                                    else "Warning colours...")
             self._show_extras(focus)
             self._show_font()
         finally:
             self._loading = False
+
+    def _show_playlist(self):
+        """The Picture tab's part of _show_look: the list, and the settings of
+        the item picked in it."""
+        items = self.look["playlist"]
+        texts = [self._item_text(n, item) for n, item in enumerate(items, 1)]
+        if texts != list(self.items_list.get(0, "end")):
+            self.items_list.delete(0, "end")
+            for text in texts:
+                self.items_list.insert("end", text)
+        item = self._item()
+        if self.items_list.curselection() != (self.sel,):
+            self.items_list.selection_clear(0, "end")
+            self.items_list.selection_set(self.sel)
+            self.items_list.see(self.sel)
+        self.shuffle.set(self.look["playlist_shuffle"])
+        fit = item["fit"]
+        self.mode.set("fill" if fit == "fill" else "fit")
+        if fit != "fill":
+            self.edge.set(fit)
+        self.fit_swatch.set(item["fit_color"])
+        self.zoom.set(item["zoom"])
+        kind = self._kind(item)
+        still = kind == "picture"
+        self.timing_lead.configure(text="Show it for" if still else "Play it")
+        self.timing_unit.configure(text="seconds, then the next" if still
+                                   else "time, then the next" if item["plays"] == 1
+                                   else "times, then the next")
+        low, high = STILL_SECONDS if still else PLAYS
+        self.timing.configure(from_=low, to=high)
+        value = str(item["seconds"] if still else item["plays"])
+        if self.timing_var.get() != value and self.root.focus_get() is not self.timing:
+            self.timing_var.set(value)
+        if kind == "video":
+            self.item_check.configure(text="Limit to 30 frames a second (lighter)")
+            self.item_flag.set(item["max_fps"] == 30)
+        else:
+            self.item_check.configure(text="Play at the GIF's own speed")
+            self.item_flag.set(bool(item.get("own_speed")) and kind == "gif")
+        position = self._positions.get(item["id"], 0.0)
+        if abs(self.seek_var.get() - position) > 1e-6:
+            self.seek_var.set(position)
+        self._show_position(item)
 
     def _show_extras(self, focus):
         """The Extras tab's part of _show_look."""
@@ -1488,7 +1659,10 @@ class MainWindow:
         """
         look = self.look
         custom = self.date_format.current() == len(DATE_PRESETS)
-        key = (look["fit"], look["show_time"], look["show_date"], custom,
+        item, count = self._item(), len(look["playlist"])
+        kind, framing = self._kind(item), self._can_frame(item)
+        key = (item["fit"], self.sel, count, kind, framing, self._play_from is not None,
+               look["show_time"], look["show_date"], custom,
                tuple(bool(s) for s in look["slots"]), look["show_stats"], look["frost"],
                tuple(look[f"show_{b}"] for b in EXTRA_BLOCKS), look["calendar"],
                look["countdown_mode"], self.todo_tree.selection(), self._editing,
@@ -1497,9 +1671,23 @@ class MainWindow:
         if key == self._controls_key:
             return
         self._controls_key = key
-        fit = look["fit"] != "fill"
-        _enable([self.blur_radio, self.color_radio], fit)
-        _enable([self.fit_swatch], fit and look["fit"] == "color")
+        settled = self.installed and not self.busy
+        fit = item["fit"] != "fill"
+        _enable([self.fill_radio, self.fit_radio, self.zoom, self.recentre_btn], framing)
+        _enable([self.blur_radio, self.color_radio], fit and framing)
+        _enable([self.fit_swatch], fit and item["fit"] == "color" and framing)
+        # With one item there is nothing to take turns with: it just plays on.
+        _enable([self.timing], count > 1)
+        _enable([self.shuffle_check], count > 2)
+        _enable([self.item_check], kind == "gif" or (kind == "video" and framing))
+        _enable([self.add_btn, self.add_default_btn], settled and count < MAX_ITEMS)
+        _enable([self.remove_btn], settled)
+        _enable([self.up_btn], settled and self.sel > 0)
+        _enable([self.down_btn], settled and self.sel < count - 1)
+        moving = kind != "picture" and self._length(item) > 0
+        _enable([self.play_btn], moving)
+        self.seek.state(["!disabled"] if moving else ["disabled"])
+        self.play_btn.configure(text="Pause" if self._play_from is not None else "Play")
         _enable(self.time_widgets, look["show_time"])
         _enable(self.date_widgets, look["show_date"])
         for widget in (self.date_entry, self.date_codes):
@@ -1515,7 +1703,7 @@ class MainWindow:
                 look["show_stats"])
         any_stats = look["show_stats"] and any(look["slots"])
         _enable([self.label_size, self.value_size, self.label_swatch, self.value_swatch,
-                 self.stats_pos], any_stats)
+                 self.stats_pos, self.warn_btn], any_stats)
         _enable([self.frost_dark, self.frost_blur], look["frost"])
         for block in EXTRA_BLOCKS:
             _enable(self.block_widgets[block], look[f"show_{block}"])
@@ -1525,14 +1713,283 @@ class MainWindow:
         chosen_item = bool(self.todo_tree.selection())
         _enable([self.todo_tick_btn, self.todo_remove_btn], chosen_item)
         _enable([self.todo_clear_btn], any(i["done"] for i in look["todo_items"]))
-        settled = self.installed and not self.busy
         _enable([self.apply_btn, self.undo_btn], self.dirty and settled)
-        _enable([self.reset_btn, self.choose_btn, self.default_btn, self.save_btn], settled)
+        _enable([self.reset_btn, self.save_btn], settled)
         chosen = bool(self.layout_list.curselection())
         _enable([self.load_btn, self.delete_btn], chosen and settled)
 
     def _fit_changed(self):
-        self._set("fit", "fill" if self.mode.get() == "fill" else self.edge.get())
+        self._set_item("fit", "fill" if self.mode.get() == "fill" else self.edge.get())
+
+    # -- the playlist ----------------------------------------------------------------
+
+    def _item(self):
+        """The playlist item picked in the list."""
+        items = self.look["playlist"]
+        self.sel = max(0, min(self.sel, len(items) - 1))
+        return items[self.sel]
+
+    def _frames_of(self, item):
+        """How many pictures an item's file holds: 1 for a still."""
+        if item.get("frames"):
+            return item["frames"]
+        path = item_path(item)
+        if path not in self._media:
+            try:
+                if path.endswith(video_win.CLIP_EXT):
+                    self._media[path] = video_win.clip_info(path)["frames"]
+                else:
+                    with Image.open(path) as img:
+                        self._media[path] = getattr(img, "n_frames", 1)
+            except Exception:
+                self._media[path] = 1
+        return self._media[path]
+
+    def _kind(self, item):
+        """"video", "gif" or "picture"."""
+        if item.get("pending") == "video" or item["file"].endswith(video_win.CLIP_EXT):
+            return "video"
+        return "gif" if self._frames_of(item) > 1 else "picture"
+
+    def _length(self, item):
+        """How long a GIF or video runs, in seconds (a GIF at the engine's 10
+        frames a second); 0 for a still, or a video that doesn't say."""
+        if self._kind(item) == "video":
+            return item.get("duration") or 0.0
+        frames = self._frames_of(item)
+        return frames / 10 if frames > 1 else 0.0
+
+    def _item_text(self, number, item):
+        kind = self._kind(item)
+        what = (f"video {_clock(self._length(item))}" if kind == "video"
+                else f"GIF, {self._frames_of(item)} frames" if kind == "gif" else "picture")
+        return f"{number}. {item['label']}  ({what})" + ("  - new" if item.get("pending") else "")
+
+    def _source_of(self, item):
+        """What the app knows of the video an applied clip was made from (its
+        path, frame rate, whether it is HDR), if it still knows it (it does
+        until it is closed) and the file is still there."""
+        source = self._sources.get(item["file"])
+        return source if source and os.path.isfile(source["path"]) else None
+
+    def _can_frame(self, item):
+        """Can this item be moved, zoomed and refitted? A picture or GIF
+        always. A video's placement is built into its clip when it is
+        converted, so only while the video itself is at hand to convert again."""
+        if not item["file"].endswith(video_win.CLIP_EXT) or item.get("pending"):
+            return True
+        return self._source_of(item) is not None
+
+    def _view(self, item):
+        """The item as the preview should draw it: an applied clip whose video
+        is at hand is drawn from the video, placed by its settings, so that it
+        can be dragged about like any other picture."""
+        if item["file"].endswith(video_win.CLIP_EXT) and not item.get("pending"):
+            source = self._source_of(item)
+            if source:
+                return {**item, **source, "file": "pending", "pending": "video"}
+        return item
+
+    def _set_item(self, key, value):
+        """A control changed one setting of the item picked in the list."""
+        if self._loading:
+            return
+        item = self._item()
+        if item.get(key) == value:
+            return
+        if (key in FRAMING or key == "max_fps") and not self._reopen(item):
+            return
+        item[key] = value
+        self.changed()
+
+    def _reopen(self, item):
+        """A clip's placement and frame rate were fixed when it was made. To
+        change them it goes back to being a video waiting to be converted.
+        False when that can't be done: the video is no longer at hand."""
+        if item["file"].endswith(video_win.CLIP_EXT) and not item.get("pending"):
+            source = self._source_of(item)
+            if source is None:
+                return False
+            item.update(source, pending="video", file="pending")
+        return True
+
+    def _item_picked(self):
+        chosen = self.items_list.curselection()
+        if self._loading or not chosen or chosen[0] == self.sel:
+            return
+        self.stop_play()
+        self.sel = chosen[0]
+        self._show_look()
+        self._update_controls()
+        self.render_preview()
+
+    def _probe(self, path):
+        return self._video().call("probe", path=path)[0]["info"]
+
+    def _video(self):
+        """The helper process that reads videos, started when first needed."""
+        if self._worker is None or not self._worker.alive():
+            self._worker = video_win.Worker()
+        return self._worker
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames(parent=self.root, filetypes=FILE_TYPES,
+                                            title="Add pictures, GIFs or videos")
+        if not paths:
+            return
+        items = list(self.look["playlist"])
+        # The rooftop GIF a fresh install shows is only a stand-in: the first
+        # file added takes its place. ("Add default" puts it back.)
+        if len(items) == 1 and items[0]["file"] == DEFAULT_FILE and items[0] == new_item():
+            items = []
+        ids = [i["id"] for i in items + self.look["playlist"] + self._saved_look["playlist"]]
+        first = None
+        for path in paths:
+            if len(items) >= MAX_ITEMS:
+                messagebox.showinfo(DISPLAY_NAME, f"The playlist holds up to {MAX_ITEMS} items.",
+                                    parent=self.root)
+                break
+            name = os.path.basename(path)
+            try:
+                kind, info = check_media_file(path, self._probe)
+            except ValueError as e:
+                messagebox.showerror(DISPLAY_NAME, f"{name}\n\n{e}", parent=self.root)
+                continue
+            item = new_item("pending", name[:100], max(ids, default=0) + 1)
+            ids.append(item["id"])
+            item.update(path=path, pending=kind)
+            if kind == "video":
+                item.update(duration=info["duration"] or 0.0, frames=info["frames"],
+                            source_fps=info["fps"], hdr=info["hdr"])
+                # A video's first picture is often black: start a little way in.
+                self._positions[item["id"]] = 1 / 3
+            else:
+                item.update(frames=info["frames"],
+                            duration=info["frames"] / 10 if info["frames"] > 1 else 0.0)
+            items.append(item)
+            first = len(items) - 1 if first is None else first
+        if first is None:
+            return
+        self.stop_play()
+        self.look["playlist"], self.sel = items, first
+        self.changed()
+
+    def add_default(self):
+        items = self.look["playlist"]
+        ids = [i["id"] for i in items + self._saved_look["playlist"]]
+        items.append(new_item(ident=max(ids, default=0) + 1))
+        self.stop_play()
+        self.sel = len(items) - 1
+        self.changed()
+
+    def remove_item(self):
+        items = self.look["playlist"]
+        self.stop_play()
+        del items[self.sel]
+        if not items:                   # there is always something to show
+            items.append(new_item())
+        self.sel = min(self.sel, len(items) - 1)
+        self.changed()
+
+    def move_item(self, step):
+        items, target = self.look["playlist"], self.sel + step
+        if 0 <= target < len(items):
+            items[self.sel], items[target] = items[target], items[self.sel]
+            self.sel = target
+            self.changed()
+
+    def _timing_typed(self):
+        """The seconds a still shows for, or the times a GIF or video plays."""
+        if self._loading:
+            return
+        item = self._item()
+        still = self._kind(item) == "picture"
+        low, high = STILL_SECONDS if still else PLAYS
+        try:
+            value = int(self.timing_var.get())
+        except ValueError:
+            return
+        if low <= value <= high:
+            self._set_item("seconds" if still else "plays", value)
+
+    def _flag_changed(self):
+        item = self._item()
+        if self._kind(item) == "video":
+            self._set_item("max_fps", 30 if self.item_flag.get() else 60)
+        else:
+            self._set_item("own_speed", self.item_flag.get())
+
+    # -- looking along a GIF or video, and playing it ---------------------------------
+
+    def _show_position(self, item):
+        """The text beside Play: where the preview is in the GIF or video."""
+        kind, position = self._kind(item), self._positions.get(item["id"], 0.0)
+        if kind == "video" and self._length(item):
+            length = self._length(item)
+            text = f"{_clock(position * length)} / {_clock(length)}"
+        elif kind == "gif":
+            frames = self._frames_of(item)
+            text = f"{round(position * (frames - 1)) + 1} / {frames}"
+        else:
+            text = ""
+        self.seek_text.configure(text=text)
+
+    def _seeked(self, value):
+        """The slider was moved: show that moment."""
+        if self._loading:
+            return
+        item = self._item()
+        self._positions[item["id"]] = float(value)
+        if self._play_from is not None:     # carry on playing from there
+            self._play_from = (time.perf_counter(), float(value))
+        self._show_position(item)
+        self.render_preview()
+
+    def toggle_play(self):
+        if self._play_from is not None:
+            self.stop_play()
+            return
+        item = self._item()
+        if self._length(item) <= 0:
+            return
+        self._play_from = (time.perf_counter(), self._positions.get(item["id"], 0.0))
+        self._update_controls()
+        self._play_tick()
+
+    def stop_play(self):
+        if self._play_from is not None:
+            self._play_from = None
+            self._update_controls()
+            self.render_preview()       # once more, at full quality
+
+    def _play_tick(self):
+        """Move the preview on to where the clock says it should be. Pictures
+        are skipped rather than queued, so it plays at its real speed however
+        long each takes to draw."""
+        # One timer at a time: Play pressed again before the last one fired
+        # must not leave two running.
+        timer, self._play_timer = self._play_timer, None
+        if timer is not None:
+            self.root.after_cancel(timer)
+        if self._play_from is None or not self.visible:
+            self._play_from = None
+            return
+        item = self._item()
+        length = self._length(item)
+        if length <= 0:
+            self.stop_play()
+            return
+        began, start = self._play_from
+        position = (start + (time.perf_counter() - began) / length) % 1.0
+        self._positions[item["id"]] = position
+        self._loading = True
+        try:
+            self.seek_var.set(position)
+        finally:
+            self._loading = False
+        self._show_position(item)
+        self.render_preview()
+        self._play_timer = self.root.after(PLAY_INTERVAL_MS, self._play_tick)
 
     def _date_choice(self):
         index = self.date_format.current()
@@ -1585,9 +2042,21 @@ class MainWindow:
     def hide(self):
         self.visible = False
         self.root.withdraw()
-        # Let go of the picture the preview was made from (a big photo is
-        # megabytes); it is read again the next time the window opens.
-        self._raw = (None, None, None)
+        self.release()
+
+    def release(self):
+        """Let go of everything the preview holds: the picture it was made
+        from (a big photo is megabytes), an open GIF, and the helper process
+        that reads videos. Hidden, the app keeps nothing; all of it comes back
+        the next time the window opens."""
+        self._play_from = None
+        self._frame = (None, None, None)
+        gif, self._gif = self._gif, None
+        if gif:
+            gif[1].close()
+        worker, self._worker = self._worker, None
+        if worker:
+            worker.close()
 
     # -- status --------------------------------------------------------------
 
@@ -1614,12 +2083,19 @@ class MainWindow:
                 self.note.pack_forget()
             self.start_btn.state(["disabled"] if idle or showing else ["!disabled"])
             self.stop_btn.state(["disabled"] if idle or not showing else ["!disabled"])
-            _enable([self.auto_check], self.installed and not self.busy)
+            _enable([self.auto_check, self.rotate_check, self.rotate_spin],
+                    self.installed and not self.busy)
             if autostart is not None:
                 self.autostart.set(bool(autostart))
+        rotation = s.get("rotation")
+        if rotation and rotation != self._rotation and not self.busy:
+            self._rotation = dict(rotation)
+            self.rotate.set(rotation["enabled"])
+            if self.root.focus_get() is not self.rotate_spin:
+                self.rotate_minutes.set(str(rotation["minutes"]))
         if "layouts" in s:
             self._show_layouts(s["layouts"])
-        if self.installed and not self.dirty and "fit" in s:
+        if self.installed and not self.dirty and "playlist" in s:
             self._load_form(s)
         self._update_controls()
 
@@ -1640,19 +2116,16 @@ class MainWindow:
 
     def _load_form(self, s):
         """Show the saved settings, unless they are already on show."""
-        config = {"picture": s.get("picture"), "picture_label": s.get("picture_label"),
-                  **{key: s[key] for key in DEFAULT_LOOK if key in s}}
+        config = {key: s[key] for key in DEFAULT_LOOK if key in s}
         key = json.dumps(config, sort_keys=True)
         if key == self._form_key:
             return
         self._form_key = key
+        self.stop_play()
         self.look = clean_look(config)
         self._saved_look = copy.deepcopy(self.look)
         self._custom_date = self.look["date_format"] not in DATE_PRESETS
-        self.chosen, self.use_default = None, False
-        self.picture_name.set((s.get("picture_label") or "Your picture")
-                              if s.get("picture") else DEFAULT_PICTURE_NAME)
-        self._current = picture_path(config)
+        self.sel = min(self.sel, len(self.look["playlist"]) - 1)
         self._show_look()
         self._place_spots()
         self._update_controls()
@@ -1660,50 +2133,36 @@ class MainWindow:
 
     # -- the picture ----------------------------------------------------------
 
-    def source(self):
-        if self.chosen:
-            return self.chosen
-        if self.use_default:
-            return DEFAULT_PICTURE_PATH
-        return self._current
-
-    def choose(self):
-        path = filedialog.askopenfilename(parent=self.root, title="Choose a picture",
-                                          filetypes=PICTURE_TYPES)
-        if not path:
-            return
-        try:
-            check_picture_file(path)
-        except ValueError as e:
-            messagebox.showerror(DISPLAY_NAME, str(e), parent=self.root)
-            return
-        self.chosen, self.use_default = path, False
-        self.picture_name.set(os.path.basename(path))
-        # A new picture starts centred.
-        self.look.update(zoom=1.0, pan_x=0.5, pan_y=0.5)
-        self.changed()
-
-    def pick_default(self):
-        self.chosen, self.use_default = None, True
-        self.picture_name.set(DEFAULT_PICTURE_NAME)
-        self.look.update(zoom=1.0, pan_x=0.5, pan_y=0.5)
-        self.changed()
-
     def recentre(self):
-        self.look.update(zoom=1.0, pan_x=0.5, pan_y=0.5)
-        self.changed()
+        item = self._item()
+        if (item["zoom"], item["pan_x"], item["pan_y"]) != (1.0, 0.5, 0.5) and self._reopen(item):
+            item.update(zoom=1.0, pan_x=0.5, pan_y=0.5)
+            self.changed()
 
-    def _show_picture_info(self, size, scale):
-        """The picture's own size, the best size, and a warning if it is
-        being enlarged enough to look soft."""
-        self.picture_info.configure(
-            text=f"This picture: {size[0]} × {size[1]} px\n"
-                 f"Best size: {FIT_SIZE[0]} × {FIT_SIZE[1]} px, or larger in the "
-                 "same tall shape.")
-        custom = self.source() != DEFAULT_PICTURE_PATH
-        self.picture_warn.configure(
-            text=f"Shown {scale:.1f}× larger than it is, so it may look soft."
-            if custom and scale > 1.05 else "")
+    def _show_picture_info(self, item, size, scale):
+        """What the item picked in the list is: its size, and for a picture
+        the best size; a warning if it is enlarged enough to look soft."""
+        kind, warn = self._kind(item), ""
+        if kind == "video" and item.get("pending"):
+            rate = min(item.get("source_fps") or 30.0, item["max_fps"])
+            text = (f"This video: {size[0]} × {size[1]} px, {_clock(self._length(item))}\n"
+                    f"It will play at {rate:g} frames a second, without sound.")
+            if item.get("hdr"):
+                warn = "This is an HDR video: its colours may look washed out here."
+        elif kind == "video":
+            frames, length = self._frames_of(item), self._length(item)
+            text = (f"Video: {_clock(length)} at {frames / length if length else 0:g} "
+                    "frames a second, without sound.")
+            if not self._can_frame(item):
+                text += "\nTo move, zoom or refit it, add the video again."
+        else:
+            text = (f"This picture: {size[0]} × {size[1]} px\n"
+                    f"Best size: {FIT_SIZE[0]} × {FIT_SIZE[1]} px, or larger in the "
+                    "same tall shape.")
+        if not warn and scale and scale > 1.05 and item["file"] != DEFAULT_FILE:
+            warn = f"Shown {scale:.1f}× larger than it is, so it may look soft."
+        self.picture_info.configure(text=text)
+        self.picture_warn.configure(text=warn)
 
     def _show_space(self, layout):
         """The tallest empty band between the blocks, in panel pixels, for
@@ -1745,21 +2204,88 @@ class MainWindow:
 
     def _start_render(self):
         self._want_render, self._rendering = False, True
-        source, look = self.source(), copy.deepcopy(self.look)
+        look = copy.deepcopy(self.look)
+        item = self._view(look["playlist"][min(self.sel, len(look["playlist"]) - 1)])
+        position = self._positions.get(item["id"], 0.0)
+        kind, playing = self._kind(item), self._play_from is not None
+        frames, length = self._frames_of(item), self._length(item)
 
         def work():
             try:
-                path, raw, size = self._raw
-                if path != source:
-                    raw, size = first_frame(source)
-                    self._raw = (source, raw, size)
-                img, layout = clock_win.preview(engine_argv(look, source), picture=raw)
-                result = (img.resize((self.pw, self.ph), Image.LANCZOS), layout, raw.size, size, look)
+                picture, size, placed = self._preview_picture(item, kind, position, frames,
+                                                              length, playing)
+                img, layout = clock_win.preview(engine_argv(look, item), picture=picture,
+                                                video=kind == "video")
+                result = (img.resize((self.pw, self.ph), Image.LANCZOS), layout,
+                          picture.size, size, item, placed)
             except BaseException as e:      # SystemExit carries the engine's message
                 result = e
             self.root.after(0, lambda: self._rendered(result))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _preview_picture(self, item, kind, position, frames, length, playing):
+        """The picture the preview is drawn from: `item`'s, `position` (0 to 1)
+        of the way along a GIF or video. Returns (picture, the original's
+        size, whether it is placed on the screen's shape already -- a clip's
+        pictures are). The last one is kept, since most redraws (a slider, a
+        colour, typing) are of the same picture. Called off the window's thread."""
+        path = item_path(item)
+        if kind == "video" and not item.get("pending"):
+            number = round(position * max(0, frames - 1))
+            key = (path, number)
+            if self._frame[0] != key:
+                _, payload = self._video().call("clipframe", path=path, number=number,
+                                                quality=85 if playing else 92)
+                picture = Image.open(BytesIO(payload))
+                picture.load()
+                self._frame = (key, picture, picture.size)
+            return self._frame[1], self._frame[2], True
+        if kind == "video":
+            # While it plays, half-size pictures keep it quick; paused, it is
+            # drawn from what the conversion itself will use.
+            seconds = round(position * max(0.0, length - 0.05), 2)
+            limit = PLAY_SOURCE_LIMIT if playing else None
+            key = (path, seconds, limit)
+            if self._frame[0] != key:
+                reply, payload = self._video().call("frame", path=path, seconds=seconds,
+                                                    limit=limit, quality=85 if playing else 92)
+                picture = Image.open(BytesIO(payload))
+                picture.load()
+                self._frame = (key, picture, tuple(reply["size"]))
+            return self._frame[1], self._frame[2], False
+        index = round(position * (frames - 1)) if frames > 1 else 0
+        key = (path, index)
+        if self._frame[0] != key:
+            self._frame = (key, *self._picture_frame(path, index, frames > 1))
+        return self._frame[1], self._frame[2], False
+
+    def _picture_frame(self, path, index, animated):
+        """Frame `index` of a picture file, as RGB, and the picture's own size.
+
+        Big photos are scaled down: every placement is worked out in
+        proportions, so the preview looks the same, and dragging stays quick.
+        A GIF is kept open while its frames are looked at, since each frame
+        is made from the ones before it; going forwards is then quick.
+        """
+        gif = self._gif
+        if gif is None or gif[0] != path or index < gif[2]:
+            if gif:
+                gif[1].close()
+            gif = [path, Image.open(path), 0]
+        img = gif[1]
+        img.seek(index)
+        gif[2] = index
+        frame = img.convert("RGB")
+        if animated:
+            self._gif = gif
+        else:
+            img.close()
+            self._gif = None
+        size = frame.size
+        if max(size) > PREVIEW_SOURCE_LIMIT:
+            frame.thumbnail((PREVIEW_SOURCE_LIMIT, PREVIEW_SOURCE_LIMIT), Image.LANCZOS)
+        return frame, size
 
     def _rendered(self, result):
         self._rendering = False
@@ -1770,14 +2296,19 @@ class MainWindow:
             self.canvas.itemconfigure(self.canvas_img, image="")
             self.canvas.itemconfigure(self.canvas_text, text=f"No preview:\n{result}")
             return
-        img, layout, raw_size, size, look = result
-        self._layout, self._raw_size = layout, raw_size
+        img, layout, raw_size, size, item, placed = result
+        self._layout, self._raw_size, self._placed = layout, raw_size, placed
         self._photo = ImageTk.PhotoImage(img)
         self.canvas.itemconfigure(self.canvas_img, image=self._photo)
         self.canvas.itemconfigure(self.canvas_text, text="")
-        scale = fit_geometry(raw_size, FIT_SIZE, look["fit"], look["zoom"],
-                             (look["pan_x"], look["pan_y"]))[0] * raw_size[0] / size[0]
-        self._show_picture_info(size, scale)
+        if self._play_from is not None:
+            return                          # playing: the texts beside it can wait
+        # How much the original is enlarged on the screen (the picture drawn
+        # from may be a scaled-down copy of it).
+        scale = None if placed else (
+            fit_geometry(raw_size, FIT_SIZE, item["fit"], item["zoom"],
+                         (item["pan_x"], item["pan_y"]))[0] * max(raw_size) / max(size))
+        self._show_picture_info(item, size, scale)
         self._show_space(layout)
         self._show_limits(layout)
 
@@ -1836,11 +2367,18 @@ class MainWindow:
                 target = (block, box)
         return target or ("picture", None)
 
+    def _movable(self):
+        """Can the picture in the preview be dragged and zoomed? Not a clip
+        whose video is no longer at hand: its placement is part of it."""
+        return bool(self._raw_size) and not self._placed and self._can_frame(self._item())
+
     def _hover(self, event):
         target = self._target(event)
         cursor = ""
-        if target:
-            cursor = "fleur" if target[0] == "picture" else "sb_v_double_arrow"
+        if target and target[0] != "picture":
+            cursor = "sb_v_double_arrow"
+        elif target and self._movable():
+            cursor = "fleur"
         self.canvas.configure(cursor=cursor)
 
     def _press(self, event):
@@ -1849,7 +2387,9 @@ class MainWindow:
             return
         block, box = target
         if block == "picture":
-            self._drag = ("picture", event.x, event.y, self.look["pan_x"], self.look["pan_y"])
+            if self._movable():
+                item = self._item()
+                self._drag = ("picture", event.x, event.y, item["pan_x"], item["pan_y"])
         else:
             start = self._layout.positions[block]
             travel = FIT_SIZE[1] - 2 * box[0] - (box[3] - box[1])
@@ -1861,37 +2401,42 @@ class MainWindow:
         kind, x0, y0, a, b = self._drag
         dx, dy = (event.x - x0) / self.k, (event.y - y0) / self.k
         if kind == "picture":
-            look = self.look
-            _, _, _, width, height = fit_geometry(self._raw_size, FIT_SIZE, look["fit"],
-                                                  look["zoom"], (a, b))
+            item = self._item()
+            _, _, _, width, height = fit_geometry(self._raw_size, FIT_SIZE, item["fit"],
+                                                  item["zoom"], (a, b))
             # pan 0..1 slides the picture across its overhang (or its gap).
+            pan_x, pan_y = item["pan_x"], item["pan_y"]
             if abs(FIT_SIZE[0] - width) > 0.5:
-                look["pan_x"] = round(_clamp(a + dx / (FIT_SIZE[0] - width)), 4)
+                pan_x = round(_clamp(a + dx / (FIT_SIZE[0] - width)), 4)
             if abs(FIT_SIZE[1] - height) > 0.5:
-                look["pan_y"] = round(_clamp(b + dy / (FIT_SIZE[1] - height)), 4)
-            self.changed()
+                pan_y = round(_clamp(b + dy / (FIT_SIZE[1] - height)), 4)
+            if (pan_x, pan_y) != (item["pan_x"], item["pan_y"]) and self._reopen(item):
+                item.update(pan_x=pan_x, pan_y=pan_y)
+                self.changed()
         elif b > 0:
             self._set(f"{kind}_pos", round(_clamp(a + dy / b), 3))
 
     def _wheel(self, event):
         """Zoom, keeping the spot under the pointer where it is."""
-        if not self._raw_size:
+        if not self._movable():
             return
-        look = self.look
-        old = look["zoom"]
+        item = self._item()
+        old = item["zoom"]
         zoom = min(MAX_ZOOM, max(1.0, old * 1.1 ** (event.delta / 120)))
         if zoom == old:
             return
-        pan = (look["pan_x"], look["pan_y"])
+        pan = (item["pan_x"], item["pan_y"])
         cx, cy = event.x / self.k, event.y / self.k
-        scale, x, y, _, _ = fit_geometry(self._raw_size, FIT_SIZE, look["fit"], old, pan)
+        scale, x, y, _, _ = fit_geometry(self._raw_size, FIT_SIZE, item["fit"], old, pan)
         u, v = (cx - x) / scale, (cy - y) / scale
-        scale, _, _, width, height = fit_geometry(self._raw_size, FIT_SIZE, look["fit"], zoom, pan)
+        scale, _, _, width, height = fit_geometry(self._raw_size, FIT_SIZE, item["fit"], zoom, pan)
+        if not self._reopen(item):
+            return
         if abs(FIT_SIZE[0] - width) > 0.5:
-            look["pan_x"] = round(_clamp((cx - u * scale) / (FIT_SIZE[0] - width)), 4)
+            item["pan_x"] = round(_clamp((cx - u * scale) / (FIT_SIZE[0] - width)), 4)
         if abs(FIT_SIZE[1] - height) > 0.5:
-            look["pan_y"] = round(_clamp((cy - v * scale) / (FIT_SIZE[1] - height)), 4)
-        look["zoom"] = round(zoom, 3)
+            item["pan_y"] = round(_clamp((cy - v * scale) / (FIT_SIZE[1] - height)), 4)
+        item["zoom"] = round(zoom, 3)
         self.changed()
 
     # -- font ---------------------------------------------------------------------
@@ -1910,11 +2455,17 @@ class MainWindow:
     # -- apply, undo, reset -------------------------------------------------------
 
     def reset(self):
-        """Everything back to how it comes, except the picture itself and what
-        the user wrote: the text, the countdown and the to-do list stay (their
-        blocks are switched off, as they come)."""
+        """Everything back to how it comes, except what the user chose or
+        wrote: the playlist (the pictures, and how each is placed and timed)
+        and the text, the countdown and the to-do list stay (their blocks are
+        switched off, as they come)."""
         kept = {key: self.look[key] for key in CONTENT_KEYS}
-        self.look = clean_look(kept)
+        # The playlist is put back as it is: it may hold files not applied
+        # yet, which clean_look (rightly, for the service) would not accept.
+        self.look = clean_look({key: value for key, value in kept.items()
+                                if not key.startswith("playlist")})
+        self.look.update({key: value for key, value in kept.items()
+                          if key.startswith("playlist")})
         self._custom_date = False
         self._show_look()
         self._place_spots()
@@ -1926,43 +2477,166 @@ class MainWindow:
         self._load_form(self.app.status)
 
     def _apply_work(self):
-        """What Apply sends, packed now so later edits can't change it."""
-        look, chosen, use_default = copy.deepcopy(self.look), self.chosen, self.use_default
+        """What Apply does, with the look as it is now, so that later edits
+        can't change it: the videos are converted, the new files sent to the
+        service, and then the settings applied. Returns work(report), where
+        report(what, done, total) is told how far it has got."""
+        look = copy.deepcopy(self.look)
+        cancel = self._cancel = threading.Event()
+        sources = self._sources
 
-        def work():
-            fields = {"look": look}
-            if chosen:
-                with open(chosen, "rb") as f:
-                    fields["picture"] = {"name": os.path.basename(chosen),
-                                         "data": base64.b64encode(f.read()).decode()}
-            elif use_default:
-                fields["picture"] = "default"
-            send_settings("apply", **fields)
+        def work(report):
+            items = look["playlist"]
+            videos = [item for item in items if item.get("pending") == "video"]
+            pictures = [item for item in items if item.get("pending") == "picture"]
+            folder = tempfile.mkdtemp(prefix="crystalx-lcd-") if videos else None
+            try:
+                # Every video is converted before anything is sent, so the
+                # files reach the service together, just before they are applied.
+                clips = []
+                for number, item in enumerate(videos, 1):
+                    what = f"Converting {item['label']}" + (
+                        f"  ({number} of {len(videos)})" if len(videos) > 1 else "")
+                    report(what, 0, 0)
+                    clip = os.path.join(folder, f"{number}{video_win.CLIP_EXT}")
+                    video_win.convert_in_worker(
+                        item["path"], clip, item["fit"], item["fit_color"], item["zoom"],
+                        (item["pan_x"], item["pan_y"]), item["max_fps"], cancel=cancel,
+                        progress=lambda done, total, what=what: report(what, done, total))
+                    clips.append((item, clip))
+                for item, path, kind in ([(item, clip, "clip") for item, clip in clips]
+                                         + [(item, item["path"], "picture") for item in pictures]):
+                    what = f"Sending {item['label']}"
+                    reply = ipc_win.upload(
+                        send_settings, path, kind, cancel=cancel,
+                        progress=lambda done, total, what=what: report(what, done, total))
+                    if kind == "clip":
+                        sources[reply["file"]] = {key: item.get(key)
+                                                  for key in ("path", "source_fps", "hdr")}
+                    item.update(file=reply["file"], frames=reply["frames"],
+                                duration=reply["duration"])
+                for item in items:
+                    for key in WINDOW_KEYS:
+                        item.pop(key, None)
+                if cancel.is_set():
+                    raise video_win.Cancelled()
+                report("Applying", 1, 1)
+                send_settings("apply", look=look)
+            finally:
+                if folder:
+                    shutil.rmtree(folder, ignore_errors=True)
         return work
 
     def apply(self):
-        self._send(self._apply_work(), "apply the settings", applied=True)
+        self._send(self._apply_work(), "apply the settings", applied=True, files=True)
 
-    def _send(self, work, what, applied=False):
+    def _send(self, work, what, applied=False, files=False):
+        """Run work(report) off the window's thread, then show what the
+        service has. When the work has files to convert or send (`files`, and
+        the playlist holds some that are new), a progress window shows how
+        far it is and lets it be cancelled."""
+        self.stop_play()
+        waiting = files and any(item.get("pending") for item in self.look["playlist"])
         self._set_busy(True)
+        report = self._open_progress() if waiting else (lambda *args: None)
 
         def done(error):
+            self._close_progress()
+            if not error:
+                # Show what the service saved straight away, rather than waiting
+                # for the next status poll (which would first show the old one).
+                self.app.status = {**self.app.status, **load_config(),
+                                   "layouts": layout_names()}
             self._set_busy(False)
+            if isinstance(error, (video_win.Cancelled, ipc_win.UploadCancelled)):
+                return                      # cancelled: everything is as it was
             if error:
+                self.app.refresh_soon()
                 messagebox.showerror(DISPLAY_NAME, f"Could not {what}:\n\n{error}",
                                      parent=self.root)
                 return
-            # Show what the service saved straight away, rather than waiting
-            # for the next status poll (which would first show the old one).
-            self.app.status = {**self.app.status, **load_config(), "layouts": layout_names()}
             if applied:
                 self.dirty = False
                 self._form_key = None
+                self._frame = (None, None, None)
                 self._load_form(self.app.status)
             self._show_layouts(self.app.status["layouts"])
             self.app.refresh_soon()
 
-        self.app.background(work, done)
+        self.app.background(lambda: work(report), done)
+
+    def _open_progress(self):
+        """The window shown while videos are converted and files sent; returns
+        the report(what, done, total) that moves its bar."""
+        top = tk.Toplevel(self.root)
+        top.title(DISPLAY_NAME)
+        top.transient(self.root)
+        top.resizable(False, False)
+        frame = ttk.Frame(top, padding=14)
+        frame.pack()
+        text = ttk.Label(frame, text="Getting ready...", width=52, anchor="w")
+        text.pack(anchor="w")
+        bar = ttk.Progressbar(frame, length=340, maximum=1000, mode="indeterminate")
+        bar.pack(pady=(8, 0), fill="x")
+        bar.start(40)
+        ttk.Label(frame, text="The case screen keeps showing what it shows now until "
+                              "this is done. Converting a long video takes a few minutes.",
+                  style="Hint.TLabel", wraplength=340, justify="left").pack(anchor="w", pady=(8, 0))
+        button = ttk.Button(frame, text="Cancel", command=self._cancel_work)
+        button.pack(anchor="e", pady=(10, 0))
+        top.protocol("WM_DELETE_WINDOW", self._cancel_work)
+        top.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - top.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - top.winfo_reqheight()) // 3
+        top.geometry(f"+{max(0, x)}+{max(0, y)}")
+        try:
+            top.grab_set()                  # the main window waits meanwhile
+        except tk.TclError:
+            pass                            # the window was hidden just then
+        self._progress = {"top": top, "text": text, "bar": bar, "button": button,
+                          "moving": True}
+        last = [0.0]
+
+        def report(what, done, total):
+            # From the worker's thread, and often: ten updates a second are plenty.
+            now = time.monotonic()
+            if done < total and now - last[0] < 0.1:
+                return
+            last[0] = now
+            self.root.after(0, lambda: self._show_progress(what, done, total))
+        return report
+
+    def _show_progress(self, what, done, total):
+        p = self._progress
+        if not p or (self._cancel is not None and self._cancel.is_set()):
+            return
+        if total:
+            if p["moving"]:
+                p["bar"].stop()
+                p["bar"].configure(mode="determinate")
+                p["moving"] = False
+            p["bar"].configure(value=1000 * done / total)
+            p["text"].configure(text=f"{what}  -  {100 * done // total}%")
+        else:
+            if not p["moving"]:
+                p["bar"].configure(mode="indeterminate")
+                p["bar"].start(40)
+                p["moving"] = True
+            p["text"].configure(text=what)
+
+    def _cancel_work(self):
+        if self._cancel is not None:
+            self._cancel.set()
+        if self._progress:
+            self._progress["text"].configure(text="Cancelling...")
+            self._progress["button"].state(["disabled"])
+
+    def _close_progress(self):
+        p, self._progress = self._progress, None
+        if p:
+            p["bar"].stop()
+            p["top"].grab_release()
+            p["top"].destroy()
 
     # -- saved layouts --------------------------------------------------------------
 
@@ -1974,7 +2648,7 @@ class MainWindow:
                 DISPLAY_NAME, f"Load \"{name}\"? Your changes that are not applied "
                               "yet will be lost.", parent=self.root):
             return
-        self._send(lambda: send_settings("load_layout", name=name),
+        self._send(lambda report: send_settings("load_layout", name=name),
                    f"load \"{name}\"", applied=True)
 
     def save_layout(self):
@@ -1994,17 +2668,49 @@ class MainWindow:
         # A layout saves what the screen shows, so unapplied changes go first.
         apply_first = self._apply_work() if self.dirty else None
 
-        def work():
+        def work(report):
             if apply_first:
-                apply_first()
+                apply_first(report)
             send_settings("save_layout", name=name)
-        self._send(work, f"save \"{name}\"", applied=bool(apply_first))
+        self._send(work, f"save \"{name}\"", applied=bool(apply_first),
+                   files=bool(apply_first))
 
     def delete_layout(self):
         name = self.selected_layout()
         if name and messagebox.askyesno(DISPLAY_NAME, f"Delete the layout \"{name}\"?",
                                         parent=self.root):
-            self._send(lambda: send_settings("delete_layout", name=name), f"delete \"{name}\"")
+            self._send(lambda report: send_settings("delete_layout", name=name),
+                       f"delete \"{name}\"")
+
+    def set_rotation(self):
+        """Switch the rotation of saved layouts, or change how often. Like
+        "Start display with Windows", it takes effect at once."""
+        try:
+            minutes = int(self.rotate_minutes.get())
+        except ValueError:
+            minutes = self._rotation["minutes"]
+        minutes = max(ROTATION_MINUTES[0], min(ROTATION_MINUTES[1], minutes))
+        rotation = {"enabled": self.rotate.get(), "minutes": minutes}
+        if self.busy:                       # not now: show what the service has
+            self.rotate.set(self._rotation["enabled"])
+            self.rotate_minutes.set(str(self._rotation["minutes"]))
+            return
+        if rotation == self._rotation:
+            self.rotate_minutes.set(str(minutes))
+            return
+        self.rotate_minutes.set(str(minutes))
+        self._rotation = rotation
+        self._send(lambda report: send_settings("set_rotation", rotation=rotation),
+                   "change the layout rotation")
+
+    # -- warning colours ----------------------------------------------------------------
+
+    def edit_warnings(self):
+        dialog = WarningsDialog(self.root, self.look)
+        self.root.wait_window(dialog.top)
+        if dialog.result is not None:
+            self.look.update(dialog.result)
+            self.changed()
 
     # -- display and options ----------------------------------------------------------
 
@@ -2055,19 +2761,83 @@ def _valid(text, fmt):
         return False
 
 
-def first_frame(path):
-    """The first frame of a picture, as RGB, and the picture's own size.
+def _clock(seconds):
+    """A length of time as m:ss."""
+    seconds = max(0, round(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
-    Big photos are scaled down: every placement is worked out in proportions,
-    so the preview looks the same, and dragging stays quick.
-    """
-    with Image.open(path) as img:
-        img.seek(0)
-        frame = img.convert("RGB")
-    size = frame.size
-    if max(size) > PREVIEW_SOURCE_LIMIT:
-        frame.thumbnail((PREVIEW_SOURCE_LIMIT, PREVIEW_SOURCE_LIMIT), Image.LANCZOS)
-    return frame, size
+
+class WarningsDialog:
+    """Which stats change colour when they get high, at what levels, and the
+    two colours. `result` is the settings to put into the look, or None if it
+    was cancelled."""
+
+    def __init__(self, parent, look):
+        self.result = None
+        self.top = tk.Toplevel(parent)
+        self.top.title("Warning colours")
+        self.top.transient(parent)
+        self.top.resizable(False, False)
+        frame = ttk.Frame(self.top, padding=14)
+        frame.pack()
+        ttk.Label(frame, text="A stat's number turns the warning colour when it reaches the "
+                              "first level, and the critical colour at the second.",
+                  wraplength=330, justify="left").grid(row=0, column=0, columnspan=4,
+                                                       sticky="w", pady=(0, 8))
+        for column, text in ((1, "Warning"), (2, "Critical")):
+            ttk.Label(frame, text=text, style="Hint.TLabel").grid(row=1, column=column, padx=4)
+        self.rows = {}
+        names = dict((key, text) for key, text in STAT_CHOICES if key)
+        for r, (slot, suggested) in enumerate(clock_win.WARN_SLOTS.items(), 2):
+            levels = look["warn"].get(slot)
+            on = tk.BooleanVar(value=levels is not None)
+            warn = tk.StringVar(value=f"{(levels or suggested)[0]:g}")
+            crit = tk.StringVar(value=f"{(levels or suggested)[1]:g}")
+            shown = slot in look["slots"]
+            ttk.Checkbutton(frame, text=names[slot] + ("" if shown else "  (not shown)"),
+                            variable=on).grid(row=r, column=0, sticky="w", pady=1)
+            for column, var in ((1, warn), (2, crit)):
+                ttk.Spinbox(frame, width=5, from_=0, to=1000, textvariable=var).grid(
+                    row=r, column=column, padx=4)
+            ttk.Label(frame, text="°C" if slot.endswith("temp") else "%").grid(
+                row=r, column=3, sticky="w")
+            self.rows[slot] = (on, warn, crit)
+        colours = ttk.Frame(frame)
+        colours.grid(row=20, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        self.warn_swatch = Swatch(colours, "Warning colour", lambda c: None)
+        self.crit_swatch = Swatch(colours, "Critical colour", lambda c: None)
+        self.warn_swatch.set(look["warn_color"])
+        self.crit_swatch.set(look["crit_color"])
+        for text, swatch in (("Warning colour", self.warn_swatch),
+                             ("Critical colour", self.crit_swatch)):
+            ttk.Label(colours, text=text).pack(side="left")
+            swatch.pack(side="left", padx=(6, 14))
+        self.problem = ttk.Label(frame, style="Note.TLabel", wraplength=330, justify="left")
+        self.problem.grid(row=21, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=22, column=0, columnspan=4, sticky="e", pady=(8, 0))
+        ttk.Button(buttons, text="Cancel", command=self.top.destroy).pack(side="right")
+        ttk.Button(buttons, text="OK", command=self._done).pack(side="right", padx=6)
+        self.top.wait_visibility()
+        self.top.grab_set()                 # modal: the main window waits
+
+    def _done(self):
+        warn = {}
+        for slot, (on, low, high) in self.rows.items():
+            if not on.get():
+                continue
+            try:
+                levels = [float(low.get()), float(high.get())]
+            except ValueError:
+                levels = None
+            if not levels or not 0 <= levels[0] <= levels[1] <= 1000:
+                self.problem.configure(text="Each level is a number, and the critical "
+                                            "level is not below the warning level.")
+                return
+            warn[slot] = levels
+        self.result = {"warn": warn, "warn_color": self.warn_swatch.color,
+                       "crit_color": self.crit_swatch.color}
+        self.top.destroy()
 
 
 # -- the app ---------------------------------------------------------------------
@@ -2155,14 +2925,23 @@ class App:
     def quit(self):
         """Stop the display and close the app."""
         self.quitting = True
+        if self.window._cancel is not None:
+            self.window._cancel.set()       # a conversion or upload under way ends here
 
         def work():
+            video_win.kill_all()
+            # Give the cancelled work a moment to clear up after itself (a
+            # half-made clip in the temporary folder).
+            deadline = time.monotonic() + 5
+            while self.window.busy and time.monotonic() < deadline:
+                time.sleep(0.05)
             if service_state() not in (None, win32service.SERVICE_STOPPED):
                 stop_service()
 
         def done(error):
             if error:
                 messagebox.showerror(DISPLAY_NAME, f"Could not stop the display:\n\n{error}")
+            self.window.release()
             self.icon.close()
             self.root.quit()
 
@@ -2170,6 +2949,12 @@ class App:
 
 
 def main():
+    if "--video-worker" in sys.argv[1:]:
+        # Not the app, but its helper: the same program started by the window
+        # to read and convert videos, so that FFmpeg never loads into the
+        # window itself (see video_win.Worker).
+        video_win.worker_main()
+        return
     hidden = "--hidden" in sys.argv[1:]
     # One app per user session. A second launch -- say from the Start menu --
     # asks the running one to show its window, then exits.

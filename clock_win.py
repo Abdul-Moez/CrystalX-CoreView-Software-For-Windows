@@ -39,6 +39,7 @@ Usage:
 import argparse
 import atexit
 import calendar
+import ctypes
 import datetime
 import functools
 import os
@@ -53,6 +54,7 @@ from io import BytesIO
 import psutil
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
+import video_win
 from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, MAX_ZOOM, Panel, fit_frame,
                      fit_size, install_handlers, load_frames)
 
@@ -347,6 +349,12 @@ DEFAULT_SLOTS = "cpu,cputemp,gpu,gputemp,ram%,disk%,net"
 EMPTY_SLOT = "-"
 # The app offers this many spots: three rows of two and one centred.
 MAX_SPOTS = 7
+# The readings whose value can change colour once it reaches a level (--warn),
+# with the warning and critical levels the app suggests for each.
+WARN_SLOTS = {"cpu": (80, 95), "gpu": (80, 95), "ram%": (80, 95), "disk%": (80, 95),
+              "storage": (85, 95), "cputemp": (75, 90), "gputemp": (75, 90)}
+WARN_COLOR, CRIT_COLOR = "#ffb000", "#ff4040"
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def parse_spots(text):
@@ -610,6 +618,40 @@ def frost(img, box, blur, darken, corner):
     img.paste(region, (x0, y0), mask)
 
 
+_FROST_MASKS = {}
+
+
+@functools.lru_cache(maxsize=16)
+def _darken_table(darken):
+    return [round(v * (1 - darken)) for v in range(256)] * 3
+
+
+def frost_fast(img, box, blur, darken, corner):
+    """frost(), for pictures that are made again for every frame (a video).
+
+    The blur is done on a quarter-size copy and scaled back up, which looks
+    the same behind dark text and costs about a quarter as much. Pictures that
+    are prepared once (a GIF's) keep the full-size blur in frost().
+    """
+    x0, y0, x1, y1 = (int(v) for v in box)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(img.width, x1), min(img.height, y1)
+    if x1 <= x0 or y1 <= y0:
+        return
+    region = img.crop((x0, y0, x1, y1))
+    small = region.reduce(4).filter(ImageFilter.GaussianBlur(max(1.0, blur / 4)))
+    region = small.resize(region.size, Image.BILINEAR)
+    if darken:
+        region = region.point(_darken_table(darken))
+    key = (region.size, corner)
+    mask = _FROST_MASKS.get(key)
+    if mask is None:
+        mask = _FROST_MASKS[key] = Image.new("L", region.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, region.width - 1, region.height - 1), corner, fill=255)
+    img.paste(region, (x0, y0), mask)
+
+
 class Shape:
     """A drawn item that isn't text: a to-do box or tick, a strike-through,
     the calendar's mark on today. Edged in black like the text's outline, so
@@ -830,6 +872,8 @@ class Layout:
         self.show_time, self.show_date = not args.no_time, not args.no_date
         self.colors = {"time": args.time_color, "date": args.date_color,
                        "label": args.label_color, "value": args.value_color}
+        self.warn = {slot: (warn, crit) for slot, warn, crit in args.warn}
+        self.warn_color, self.crit_color = args.warn_color, args.crit_color
         self.time_fmt = TIME_FORMATS[args.time_format][1 if args.seconds else 0]
         self.date_fmt = date_strftime(args.date_format)
         self.limits, self.boxes, self.positions = {}, {}, {}
@@ -1142,19 +1186,39 @@ class Layout:
             if len(row) == 2:
                 # A full row: left column anchored "la", right "ra".
                 left, right = self.labels[row[0]], self.labels[row[1]]
+                first, second = next(values), next(values)
                 items += [
                     (left, self.label_font, self.col_left, top, "la", color["label"]),
                     (right, self.label_font, self.col_right, top, "ra", color["label"]),
-                    (next(values), self.value_font, self.col_left, below, "la", color["value"]),
-                    (next(values), self.value_font, self.col_right, below, "ra", color["value"]),
+                    (first, self.value_font, self.col_left, below, "la",
+                     self.value_color(row[0], first)),
+                    (second, self.value_font, self.col_right, below, "ra",
+                     self.value_color(row[1], second)),
                 ]
             else:
                 # A stat on its own row, centred across the full width.
+                value = next(values)
                 items += [
                     (self.labels[row[0]], self.label_font, w // 2, top, "ma", color["label"]),
-                    (next(values), self.value_font, w // 2, below, "ma", color["value"]),
+                    (value, self.value_font, w // 2, below, "ma",
+                     self.value_color(row[0], value)),
                 ]
         return items
+
+    def value_color(self, slot, text):
+        """The colour a stat's value is drawn in: its usual one, or the warning
+        or critical colour once the reading has reached that level (--warn).
+        The level is read from the text shown, so "--" never warns."""
+        levels = self.warn.get(slot)
+        if levels:
+            number = _NUMBER.match(text)
+            if number:
+                reading = float(number.group())
+                if reading >= levels[1]:
+                    return self.crit_color
+                if reading >= levels[0]:
+                    return self.warn_color
+        return self.colors["value"]
 
     def describe(self):
         """The text sizes, for the log: "clock 48px / date 22px"."""
@@ -1214,6 +1278,21 @@ def _label(text):
         raise argparse.ArgumentTypeError(
             f"{text!r} is not SLOT=TEXT with a slot from: {', '.join(SLOTS)}")
     return slot, label
+
+
+def _warn(text):
+    """--warn cputemp=75:90 -> ("cputemp", 75.0, 90.0)."""
+    slot, _, levels = text.partition("=")
+    slot = slot.strip().lower()
+    try:
+        warn, crit = (float(level) for level in levels.split(":"))
+    except ValueError:
+        warn = crit = None
+    if slot not in WARN_SLOTS or warn is None or not 0 <= warn <= crit <= 1000:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not SLOT=WARNING:CRITICAL (for example cputemp=75:90) "
+            f"with a slot from: {', '.join(WARN_SLOTS)}")
+    return slot, warn, crit
 
 
 def build_parser():
@@ -1280,6 +1359,19 @@ def build_parser():
     ap.add_argument("--label", type=_label, action="append", default=[],
                     metavar="SLOT=TEXT",
                     help="rename a stat on screen, e.g. cputemp=CPU; repeatable")
+    ap.add_argument("--warn", type=_warn, action="append", default=[],
+                    metavar="SLOT=WARNING:CRITICAL",
+                    help="draw a stat's value in the warning colour once it reaches "
+                         "WARNING, and in the critical colour at CRITICAL, e.g. "
+                         f"cputemp=75:90; repeatable. For: {', '.join(WARN_SLOTS)}"
+                         .replace("%", "%%"))
+    ap.add_argument("--warn-color", type=ImageColor.getrgb, default=WARN_COLOR,
+                    help=f"the warning colour (default {WARN_COLOR})")
+    ap.add_argument("--crit-color", type=ImageColor.getrgb, default=CRIT_COLOR,
+                    help=f"the critical colour (default {CRIT_COLOR})")
+    ap.add_argument("--own-speed", action="store_true",
+                    help="play a GIF at the speed it was made for (up to 30 frames "
+                         "a second) instead of at --fps")
     ap.add_argument("--preview", metavar="FILE",
                     help="save one frame to FILE and exit, without opening the "
                          "panel -- lets you tune layout while it keeps running")
@@ -1345,6 +1437,12 @@ def _frames(args, limit=None, picture=None, each=None):
     if not args.fit and (args.zoom != 1 or args.pan_x != 0.5 or args.pan_y != 0.5):
         sys.exit("--zoom, --pan-x and --pan-y need --fit")
     pan = (args.pan_x, args.pan_y)
+    if picture is None and _is_clip(args.source):
+        # A clip's pictures are placed already; a preview shows its first.
+        try:
+            return [video_win.clip_frame(args.source, 0)[0]]
+        except video_win.VideoError as e:
+            sys.exit(str(e))
     if picture is None:
         return load_frames(args.source, args.width, args.fit, args.fit_color,
                            args.zoom, pan, limit, each)
@@ -1383,22 +1481,40 @@ def _stats_setup(args):
     return stat_rows(spots, args.columns), labels
 
 
-def preview(argv, picture=None):
+def _is_clip(source):
+    return os.path.splitext(source)[1].lower() == video_win.CLIP_EXT
+
+
+def _compose_frame(frame, layout, args, items, video=False):
+    """One whole picture, the right way up: `frame` with the panels frosted,
+    `items` drawn over it, dimmed. A video's panels get the frost its player
+    uses (frost_fast), so a preview of one matches the screen."""
+    if video:
+        img = frame.copy()
+        for box in layout.panels:
+            frost_fast(img, box, args.frost_blur, args.frost_dark, args.frost_corner)
+        img = compose(img, items)
+    else:
+        img = compose(frame, items, layout.panels, args.frost_blur, args.frost_dark,
+                      args.frost_corner)
+    return dim(img, args.brightness)
+
+
+def preview(argv, picture=None, video=False):
     """One frame as the panel will show it, with example readings.
 
     For the app's preview: returns (image, layout), where the layout says how
     large each text could grow and where the blocks sit. `picture` is the
-    source's first frame, already opened (see _frames). Never reads a sensor
-    or opens the port.
+    source's first frame, already opened (see _frames); `video` says it is a
+    picture of a video. Never reads a sensor or opens the port.
     """
     args = build_parser().parse_args(argv)
     frame = _frames(args, limit=1, picture=picture)[0]
     rows, labels = _stats_setup(args)
     layout = Layout(args, frame.width, frame.height, rows, labels)
     stats = SampleMetrics([name for row in rows for name in row])
-    img = compose(frame, layout.static + layout.items(layout.clock(), stats.values()),
-                  layout.panels, args.frost_blur, args.frost_dark, args.frost_corner)
-    return dim(img, args.brightness), layout
+    items = layout.static + layout.items(layout.clock(), stats.values())
+    return _compose_frame(frame, layout, args, items, video or _is_clip(args.source)), layout
 
 
 class Show:
@@ -1409,6 +1525,8 @@ class Show:
     builds the new Show while the old one keeps playing (Player.swap).
     `get_temps` lets the service share one Temperatures between Shows.
     """
+
+    kind = "pictures"
 
     def __init__(self, args, log, get_temps=None):
         w, h = _panel_size(args)
@@ -1423,6 +1541,14 @@ class Show:
         if len(frames) == 1:
             frames = [unpack(frames[0], (w, h))]    # a still picture: nothing to save
         self.frames = frames
+        # The rate it plays at: --fps, or with --own-speed the GIF's own. Only
+        # then is it paced by a Pacer; otherwise the loop keeps time as it
+        # always has.
+        self.fps, self.pacer = args.fps, None
+        if args.own_speed and len(frames) > 1:
+            own = own_fps(args.source)
+            if own and abs(own - args.fps) > 0.01:
+                self.fps, self.pacer = own, Pacer(own)
         self.slots = [name for row in rows for name in row]
         self.stats = Metrics(self.slots, get_temps=get_temps) if self.slots else None
         if self.stats and self.stats.temps:
@@ -1439,15 +1565,194 @@ class Show:
         w, h = self.size
         layout = self.layout
         return (f"{len(self.frames)} frames at {w}x{h} ({w * h:,} px), "
-                f"{self.args.fps:g} FPS, on {port}, "
+                f"{self.fps:g} FPS, on {port}, "
                 f"font {os.path.basename(layout.font_path)}, {layout.describe()}"
                 + ("" if self.stats is None else
                    f", slots {'/'.join(self.slots)} at y={layout.stats_y} "
                    f"(labels {layout.label_font.size}px, values {layout.value_font.size}px)"))
 
     def close(self):
+        if self.pacer:
+            self.pacer.close()
         if self.stats:
             self.stats.close()
+
+
+OWN_FPS = (1.0, 30.0)       # the range a GIF's own speed is kept within
+
+
+def own_fps(source):
+    """The frame rate a GIF was made for, from its frames' own durations, or
+    None if it doesn't say. (Without --own-speed every GIF plays at --fps.)"""
+    try:
+        with Image.open(source) as img:
+            count, total = getattr(img, "n_frames", 1), 0
+            for index in range(count):
+                img.seek(index)
+                total += img.info.get("duration") or 0
+    except Exception:
+        return None
+    if count < 2 or total <= 0:
+        return None
+    return max(OWN_FPS[0], min(OWN_FPS[1], 1000.0 * count / total))
+
+
+@functools.lru_cache(maxsize=1)
+def _kernel32():
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateWaitableTimerExW.restype = wintypes.HANDLE
+    k32.CreateWaitableTimerExW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR,
+                                           wintypes.DWORD, wintypes.DWORD]
+    k32.SetWaitableTimer.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong),
+                                     wintypes.LONG, wintypes.LPVOID, wintypes.LPVOID,
+                                     wintypes.BOOL]
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
+class Pacer:
+    """Waits until the next frame is due, to within about a millisecond.
+
+    Windows' ordinary sleeps (Event.wait, time.sleep) end on the system timer's
+    15.6 ms ticks, so a 33 ms wait comes out as 47 and "30 fps" is really 21.
+    A high-resolution waitable timer (Windows 10 1803 and later) is accurate
+    without changing the system timer for any other program. Deadlines are
+    absolute, so the rate does not drift; a player that has fallen far behind
+    starts the clock again rather than sending a burst.
+    """
+
+    def __init__(self, fps):
+        self.period = 1.0 / fps
+        self.deadline = time.perf_counter()
+        try:
+            # CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS
+            self.handle = _kernel32().CreateWaitableTimerExW(None, None, 0x2, 0x1F0003) or None
+        except (OSError, AttributeError):
+            self.handle = None          # an older Windows: ordinary sleeps then
+
+    def wait(self, stop=None):
+        self.deadline += self.period
+        left = self.deadline - time.perf_counter()
+        if left < -self.period:
+            self.deadline = time.perf_counter()
+        elif left > 0:
+            if self.handle:
+                due = ctypes.c_longlong(-int(left * 1e7))
+                k32 = _kernel32()
+                k32.SetWaitableTimer(self.handle, ctypes.byref(due), 0, None, None, False)
+                k32.WaitForSingleObject(self.handle, 1000)
+            elif stop is not None:
+                stop.wait(left)
+            else:
+                time.sleep(left)
+
+    def close(self):
+        if self.handle:
+            _kernel32().CloseHandle(self.handle)
+            self.handle = None
+
+
+class TextLayer:
+    """The clock, the stats and the blocks, as strips to lay over each picture
+    of a clip.
+
+    A clip's pictures are different every time, so unlike a GIF's they cannot
+    have the blocks drawn in once. The strips are drawn again only when the text
+    changes, on a thread of their own: reading the sensors takes up to 40 ms
+    and drawing the text 7, which at 30 or 60 pictures a second would be a late
+    picture every two seconds if the player did it itself. It looks 20 times a
+    second, so a clock showing seconds ticks evenly; looking costs next to
+    nothing (the readings themselves are only taken every two seconds).
+    """
+
+    INTERVAL = 0.05
+
+    def __init__(self, show):
+        self.show, self.bands, self._stamp, self.error = show, [], None, None
+        self._stop = threading.Event()
+        self._update()                  # ready before the first picture goes out
+        self._thread = threading.Thread(target=self._run, name="text", daemon=True)
+        self._thread.start()
+
+    def _update(self):
+        show = self.show
+        clock, vals = show.tick()
+        stamp = clock + vals
+        if stamp != self._stamp:
+            items = show.layout.static + show.layout.items(clock, vals)
+            self.bands = text_bands(items, show.size, show.args.brightness)
+            self._stamp = stamp
+
+    def _run(self):
+        while not self._stop.wait(self.INTERVAL):
+            try:
+                self._update()
+            except Exception as e:      # keep the last text rather than lose it
+                self.error = e
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(2)
+
+
+class VideoShow:
+    """A Show for a clip (see video_win): decoded as it plays.
+
+    Nothing can be prepared in advance, so each picture is frosted, dimmed,
+    given the text strips and encoded as it goes out: about 7 ms of work each.
+    """
+
+    kind = "video"
+
+    def __init__(self, args, log, get_temps=None):
+        self.clip = video_win.ClipReader(args.source)
+        try:
+            w, h = self.size = self.clip.size
+            rows, labels = _stats_setup(args)
+            self.args = args
+            self.layout = Layout(args, w, h, rows, labels)
+            self.fps, self.frames = self.clip.fps, self.clip.frames
+            self.slots = [name for row in rows for name in row]
+            self.stats = Metrics(self.slots, get_temps=get_temps) if self.slots else None
+            if self.stats and self.stats.temps:
+                log(self.stats.temps.status())
+        except BaseException:
+            self.clip.close()
+            raise
+        self.header = struct.pack("<IHHHH", MAGIC, w, h, 0, 1)
+        self.valid_until = self.layout.valid_until
+        # The clip's pictures are upside down, so the panels behind the text are too.
+        self.panels = [(w - x1, h - y1, w - x0, h - y0) for x0, y0, x1, y1 in self.layout.panels]
+
+    def tick(self):
+        return self.layout.clock(), self.stats.values() if self.stats else ()
+
+    def describe(self, port):
+        w, h = self.size
+        layout = self.layout
+        return (f"{self.frames} frames at {w}x{h} ({w * h:,} px), "
+                f"{self.fps:g} FPS, on {port}, video clip, "
+                f"font {os.path.basename(layout.font_path)}, {layout.describe()}"
+                + ("" if self.stats is None else
+                   f", slots {'/'.join(self.slots)} at y={layout.stats_y} "
+                   f"(labels {layout.label_font.size}px, values {layout.value_font.size}px)"))
+
+    def close(self):
+        self.clip.close()
+        if self.stats:
+            self.stats.close()
+
+
+def make_show(args, log, get_temps=None):
+    """The Show for what args.source is: a video clip, or a picture or GIF."""
+    if _is_clip(args.source):
+        try:
+            return VideoShow(args, log, get_temps)
+        except video_win.VideoError as e:
+            raise SystemExit(str(e)) from None
+    return Show(args, log, get_temps)
 
 
 class Player:
@@ -1463,32 +1768,67 @@ class Player:
     swap() hands over a new Show, built elsewhere; the old one plays until
     then, so changing settings never freezes the screen. When the Show's
     static blocks go out of date (the calendar at midnight, a countdown),
-    `on_stale` is called once, to build a fresh Show and swap it in.
+    `on_stale` is called, to build a fresh Show and swap it in -- and again
+    every STALE_RETRY seconds for as long as the old Show is still the one
+    playing, in case building the new one failed.
     """
 
-    def __init__(self, panel, show, on_stale=None):
-        self.panel, self.show, self.on_stale = panel, show, on_stale
-        self._next = None
+    STALE_RETRY = 60
 
-    def swap(self, show):
-        self._next = show
+    def __init__(self, panel, show, on_stale=None, on_started=None):
+        self.panel, self.show, self.on_stale = panel, show, on_stale
+        self.on_started = on_started        # told each time a swapped-in show starts
+        self._next = self._next_at = None
+        self._swap_lock = threading.Lock()
+
+    def swap(self, show, at=None):
+        """Play `show` instead of the current one: straight away, or at the
+        time `at` (epoch seconds), when a playlist's item is due to end. The
+        current one plays until then, so there is never a gap. A show that was
+        still waiting its turn is closed: it will never play."""
+        with self._swap_lock:
+            replaced, self._next, self._next_at = self._next, show, at
+        if replaced is not None and replaced is not show:
+            replaced.close()
+
+    def _take(self):
+        """The show waiting to be swapped in, once it is due; else None."""
+        if self._next is None:
+            return None
+        with self._swap_lock:
+            if self._next is None or (self._next_at is not None
+                                      and time.time() < self._next_at):
+                return None
+            show, self._next, self._next_at = self._next, None, None
+        return show
+
+    def _swapped(self, show):
+        if self.on_started:
+            self.on_started(show)
 
     def run(self, stop=None):
         cache = {}
         shown, bands = None, []
-        stale_reported = False
+        stale_retry = 0.0               # when an out-of-date show is next reported
         show = self.show
         i = 0
         while stop is None or not stop.is_set():
             start = time.time()
-            if self._next is not None:
-                old, show, self._next = show, self._next, None
+            taken = self._take()
+            if taken is not None:
+                old, show = show, taken
                 self.show = show
                 old.close()
                 cache.clear()
-                shown, stale_reported = None, False
-            if show.valid_until and not stale_reported and start >= show.valid_until:
-                stale_reported = True
+                shown, stale_retry = None, 0.0
+                self._swapped(show)
+            if show.kind == "video":
+                show = self._play_video(show, stop)
+                cache.clear()
+                shown, stale_retry = None, 0.0
+                continue
+            if show.valid_until and start >= show.valid_until and start >= stale_retry:
+                stale_retry = start + self.STALE_RETRY
                 if self.on_stale:
                     self.on_stale()
             clock, vals = show.tick()
@@ -1505,11 +1845,60 @@ class Player:
                     show.frames[idx], show.size, bands, show.args.quality)
             self.panel.send(payload)
             i += 1
+            if show.pacer is not None:          # a GIF at its own speed
+                show.pacer.wait(stop)
+                continue
             wait = max(0, 1.0 / show.args.fps - (time.time() - start))
             if stop is None:
                 time.sleep(wait)
             else:
                 stop.wait(wait)
+
+    def _play_video(self, show, stop):
+        """Play a clip until something replaces it or the player stops;
+        returns the Show to carry on with.
+
+        The picture sent is the one due by the clock, not simply the next one:
+        if sending falls behind, pictures are skipped (decoded, not made into
+        pictures) and the video stays in time instead of running slow.
+        """
+        text = TextLayer(show)
+        pacer = Pacer(show.fps)
+        args, clip, flipped = show.args, show.clip, show.panels
+        started, given, stale_retry = time.perf_counter(), 0, 0.0
+        try:
+            while stop is None or not stop.is_set():
+                taken = self._take()
+                if taken is not None:
+                    text.close()                # before the show's readings close
+                    old, show = show, taken
+                    self.show = show
+                    old.close()
+                    self._swapped(show)
+                    return show
+                if show.valid_until:
+                    now = time.time()
+                    if now >= show.valid_until and now >= stale_retry:
+                        stale_retry = now + self.STALE_RETRY
+                        if self.on_stale:
+                            self.on_stale()
+                due = int((time.perf_counter() - started) * show.fps)
+                img = clip.read(skip=max(0, due - given))
+                given = max(given, due) + 1
+                for box in flipped:
+                    frost_fast(img, box, args.frost_blur, args.frost_dark, args.frost_corner)
+                if args.brightness < 100:
+                    img = dim(img, args.brightness)
+                for y, strip in text.bands:
+                    img.paste(strip, (0, y), strip)
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=args.quality, subsampling=0)
+                self.panel.send(show.header + buf.getvalue())
+                pacer.wait(stop)
+            return show
+        finally:
+            text.close()
+            pacer.close()
 
 
 def main(argv=None, stop=None, log=None):
@@ -1526,7 +1915,7 @@ def main(argv=None, stop=None, log=None):
         _write_preview(args, log)
         return
 
-    show = Show(args, log)
+    show = make_show(args, log)
     try:
         panel = Panel(args.port)
     except BaseException:
@@ -1543,7 +1932,7 @@ def main(argv=None, stop=None, log=None):
         """At midnight (or a countdown's next change): fresh static blocks."""
         def build():
             try:
-                player.swap(Show(args, log))
+                player.swap(make_show(args, log))
             except (SystemExit, Exception) as e:
                 log(f"could not refresh the blocks: {e}")
         threading.Thread(target=build, name="rebuild", daemon=True).start()
@@ -1578,9 +1967,9 @@ def _write_preview(args, log):
             time.sleep(0.6)
             stats.refresh()
         vals = stats.values() if stats else ()
-        dim(compose(frames[0], layout.static + layout.items(layout.clock(), vals),
-                    layout.panels, args.frost_blur, args.frost_dark, args.frost_corner),
-            args.brightness).save(args.preview)
+        _compose_frame(frames[0], layout, args,
+                       layout.static + layout.items(layout.clock(), vals),
+                       _is_clip(args.source)).save(args.preview)
     finally:
         if stats:
             stats.close()

@@ -192,14 +192,37 @@ middle), and `--columns 1` puts one reading on each row, with bigger numbers.
 **Using your own picture:** add `--fit fill` (crop to cover the screen),
 `--fit blur` (whole picture, blurred edges) or `--fit color --fit-color #203040`
 (whole picture, solid edges) and put your file name in place of the rooftop
-GIF. `--zoom 2 --pan-x 0` zooms in and shows the left side.
+GIF. `--zoom 2 --pan-x 0` zooms in and shows the left side. A GIF made to run
+faster than 10 frames a second plays at its own speed with `--own-speed`.
+
+**Using a video** (up to 5 minutes long) takes two steps, because a video is
+first converted for the screen:
+
+1. Convert it, once. In the project folder, hold **Shift**, right-click an
+   empty spot and choose **Open PowerShell window here**, then run (with your
+   own file name):
+
+   ```
+   venv-win\Scripts\python.exe video_win.py convert "my video.mp4" myvideo.cxv
+   ```
+
+   This makes `myvideo.cxv`. How the video is placed is decided here, with the
+   same options as for a picture: `--fit fill` (the default), `--fit blur` or
+   `--fit color`, `--zoom` and `--pan-x` / `--pan-y`. It plays at up to 30
+   frames a second; add `--max-fps 60` for a 60-frames-a-second video. There
+   is no sound.
+2. Put `myvideo.cxv` in place of the rooftop GIF in `run-clock.cmd`, without
+   any `--fit` option, and start it.
 
 Everything the app's window can change works here too — 24-hour time
 (`--time-format 24h`), seconds, the date format (`--date-format "YYYY-MM-DD"`),
 sizes, colours, positions, renamed stats, fonts, brightness
 (`--brightness 70`), a calendar (`--calendar month`), your own text, a
-countdown and a to-do list. See
-[Command-line options](HOW-IT-WORKS.md#command-line-options).
+countdown, a to-do list, and warning colours (`--warn cputemp=75:90` turns the
+CPU temperature orange at 75°C and red at 90°C). See
+[Command-line options](HOW-IT-WORKS.md#command-line-options). Two things are
+the app's alone: the playlist and the rotation of saved layouts. A script
+shows one picture, GIF or video.
 
 ---
 
@@ -238,9 +261,14 @@ motherboard. In Device Manager, under **Ports (COM & LPT)**, you should see
 The program stopped. The screen only shows a picture while something keeps
 sending it. Start `run-clock.cmd` again and read any message in its window.
 
-**The picture is torn or scrambled**
-The picture being sent is too big — this happens if you changed `--width`
-without `--fit`. Go back to the default settings.
+**"… is … px, over the 475,000 px limit"**
+The picture being sent is too big for the screen, which scrambles anything
+larger — this happens if you raised `--width` without `--fit`. Go back to the
+default width (320), or add `--fit fill`.
+
+**"No module named 'av'"**, or a video won't convert
+The video part was added in version 1.3 and isn't installed in this folder
+yet. Double-click `setup.cmd` again.
 
 **CPU Temp shows `--`**
 The first line in the black window says why. Usually one of these:

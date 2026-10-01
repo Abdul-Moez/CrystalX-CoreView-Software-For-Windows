@@ -13,8 +13,9 @@
 ;              Start menu entry and starts the tray app at every login
 ;   upgrade    the same, over the old version, keeping the user's settings
 ;   uninstall  removes all of that plus C:\ProgramData\CrystalX LCD (the
-;              picture, settings and log). If there are saved layouts it asks
-;              first whether to delete them too; kept, they come back when the
+;              pictures and videos, settings and log). If there are saved
+;              layouts it asks first whether to delete them too; kept (with
+;              the pictures and videos they use), they come back when the
 ;              app is installed again. PawnIO stays: it is a shared driver
 ;              other programs may use, and it has its own uninstaller.
 
@@ -144,7 +145,9 @@ begin
   end;
 end;
 
-{ The data folder, all but its layouts folder. }
+{ The data folder, all but its layouts folder and the media folder, which
+  holds the pictures and videos the layouts show. (What no layout uses in
+  there is cleared out by the service when the app is installed again.) }
 procedure DeleteAllButLayouts;
 var
   Found: TFindRec;
@@ -155,7 +158,8 @@ begin
       if (Found.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0 then
         DeleteFile(DataDir + '\' + Found.Name)
       else if (Found.Name <> '.') and (Found.Name <> '..')
-          and (CompareText(Found.Name, 'layouts') <> 0) then
+          and (CompareText(Found.Name, 'layouts') <> 0)
+          and (CompareText(Found.Name, 'media') <> 0) then
         DelTree(DataDir + '\' + Found.Name, True, True, True);
     until not FindNext(Found);
   finally
@@ -240,8 +244,8 @@ begin
   if Count = 1 then Noun := 'layout' else Noun := 'layouts';
   Result := SuppressibleMsgBox(
     Format('You have %d saved %s. Delete them too?', [Count, Noun]) + #13#10#13#10 +
-    'Choose No to keep them: they stay in ' + DataDir + '\layouts and come back ' +
-    'if you install {#AppName} again.',
+    'Choose No to keep them: they stay in ' + DataDir + ' (the layouts and ' +
+    'media folders) and come back if you install {#AppName} again.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDNO;
 end;
 

@@ -27,8 +27,9 @@ stats there is no performance counter to read them from. LibreHardwareMonitor
 does the reading; its DLLs ship in lib/LibreHardwareMonitor and are loaded
 through pythonnet.
 
-The CPU sensor also needs the PawnIO driver (installed separately, see the
-README) and administrator rights. The GPU sensor needs neither on an AMD
+The CPU sensor also needs the PawnIO driver (the app's installer adds it;
+script users install it themselves, see docs/SCRIPTS.md) and administrator
+rights. The GPU sensor needs neither on an AMD
 card, so the two are looked up and reported separately: without admin rights
 the GPU temperature still shows.
 """

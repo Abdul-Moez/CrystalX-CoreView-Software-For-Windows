@@ -15,11 +15,76 @@ Run with the Python that did the PyInstaller build, after the build:
 import glob
 import importlib.metadata as metadata
 import os
+import shutil
 import sys
 import tkinter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAWNIO_VERSION = "2.2.0"        # keep in step with the release workflow
+
+# FFmpeg and the libraries built into it, which play and convert videos. They
+# come inside PyAV's wheel (its av.libs folder), built by the pyav-ffmpeg
+# project. The versions and sources below are those of the build PyAV
+# FFMPEG_FOR_PYAV uses: PyAV's scripts/ffmpeg-latest.json names the pyav-ffmpeg
+# release, whose scripts/pkg.py names every source. Their licence texts,
+# fetched from those very sources, are in licenses/ffmpeg.
+#
+# When PyAV is upgraded: look both files up again, correct this list, fetch the
+# licence texts again, and only then change FFMPEG_FOR_PYAV. The build stops
+# if the installed PyAV is not the one this list was made for.
+FFMPEG_FOR_PYAV = "19.0.0"
+FFMPEG_BUILD = "https://github.com/PyAV-Org/pyav-ffmpeg/tree/9.0.2-1"
+_X264 = "b35605ace3ddf7c1a5d67a2eb553f034aef41d55"
+TOOLCHAIN = "(the build toolchain's)"
+# name, version, licence, source code, licence files
+FFMPEG_PARTS = [
+    ("FFmpeg", "9.0.2", "LGPL-3.0-or-later (as this build is configured)",
+     "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+     ["FFmpeg-LICENSE.md", "FFmpeg-COPYING.LGPLv3.txt"]),
+    ("x264", _X264, "GPL-2.0-or-later",
+     f"https://code.videolan.org/videolan/x264/-/archive/{_X264}/x264-{_X264}.tar.bz2",
+     ["x264-COPYING.txt"]),
+    ("x265", "4.3", "GPL-2.0-or-later",
+     "https://github.com/Multicorewareinc/x265/releases/download/4.3/x265_4.3.tar.gz",
+     ["x265-COPYING.txt"]),
+    ("lamer (LAME)", "3.101.0", "LGPL-2.1",
+     "https://github.com/basswood-io/lamer/archive/refs/tags/v3.101.0.tar.gz",
+     ["lamer-LICENSE.txt"]),
+    ("Opus", "1.6.1", "BSD-3-Clause",
+     "https://ftp.osuosl.org/pub/xiph/releases/opus/opus-1.6.1.tar.gz", ["opus-COPYING.txt"]),
+    ("dav1d", "1.5.4", "BSD-2-Clause",
+     "https://code.videolan.org/videolan/dav1d/-/archive/1.5.4/dav1d-1.5.4.tar.bz2",
+     ["dav1d-COPYING.txt"]),
+    ("SVT-AV1", "4.2.0", "BSD-3-Clause-Clear, with the AOM Patent License 1.0",
+     "https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v4.2.0/SVT-AV1-v4.2.0.tar.bz2",
+     ["SVT-AV1-LICENSE.md", "SVT-AV1-PATENTS.md"]),
+    ("libvpx", "1.17.0", "BSD-3-Clause",
+     "https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz",
+     ["libvpx-LICENSE.txt", "libvpx-PATENTS.txt"]),
+    ("libpng", "1.6.58", "libpng licence",
+     "https://downloads.sourceforge.net/project/libpng/libpng16/1.6.58/libpng-1.6.58.tar.xz",
+     ["libpng-LICENSE.txt"]),
+    ("libwebp", "1.6.0", "BSD-3-Clause",
+     "https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz",
+     ["libwebp-COPYING.txt", "libwebp-PATENTS.txt"]),
+    ("libvmaf", "3.2.1", "BSD-2-Clause-Patent",
+     "https://github.com/Netflix/vmaf/archive/refs/tags/v3.2.1.tar.gz", ["libvmaf-LICENSE.txt"]),
+    ("libvpl", "2.16.0", "MIT",
+     "https://github.com/intel/libvpl/archive/refs/tags/v2.16.0.tar.gz", ["libvpl-LICENSE.txt"]),
+    ("AMF headers", "1.5.2", "MIT",
+     "https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.2/"
+     "AMF-headers-v1.5.2.tar.gz", ["AMF-LICENSE.txt"]),
+    ("nv-codec-headers", "13.0.19.0", "MIT (stated in each header)",
+     "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n13.0.19.0.tar.gz", []),
+    ("zlib", TOOLCHAIN, "Zlib", "https://zlib.net/", ["zlib-LICENSE.txt"]),
+    ("libiconv", TOOLCHAIN, "LGPL-2.1-or-later",
+     "https://www.gnu.org/software/libiconv/", ["libiconv-COPYING.LIB.txt"]),
+    ("GCC runtime libraries (libgcc, libstdc++)", TOOLCHAIN,
+     "GPL-3.0-or-later with the GCC Runtime Library Exception 3.1",
+     "https://gcc.gnu.org/", ["GCC-COPYING.RUNTIME.txt"]),
+    ("winpthreads", TOOLCHAIN, "MIT and BSD-3-Clause",
+     "https://www.mingw-w64.org/", ["winpthreads-COPYING.txt"]),
+]
 
 
 def dist_file(dist, path):
@@ -75,6 +140,8 @@ COMPONENTS = [
      "https://github.com/python-cffi/cffi", dist_file("cffi", "licenses/LICENSE")),
     ("pycparser", dist_version("pycparser"), "BSD-3-Clause",
      "https://github.com/eliben/pycparser", dist_file("pycparser", "licenses/LICENSE")),
+    ("PyAV", dist_version("av"), "BSD-3-Clause",
+     "https://github.com/PyAV-Org/PyAV", dist_file("av", "licenses/LICENSE.txt")),
     ("PyInstaller-bootloader", dist_version("pyinstaller"),
      "GPL-2.0 with the bootloader exception",
      "https://github.com/pyinstaller/pyinstaller",
@@ -115,9 +182,47 @@ def main(app_folder):
         "  Details:  _internal\\lib\\LibreHardwareMonitor\\THIRD-PARTY-NOTICES.md",
         "",
     ]
+    summary += ffmpeg_notices(out)
     with open(os.path.join(out, "THIRD-PARTY-NOTICES.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(summary))
-    print(f"wrote {len(COMPONENTS)} licences to {out}")
+    print(f"wrote {len(COMPONENTS)} licences and {len(FFMPEG_PARTS)} of FFmpeg's to {out}")
+
+
+def ffmpeg_notices(out):
+    """Copy FFmpeg's and its libraries' licence texts to <out>/ffmpeg and
+    return the lines that describe them."""
+    installed = metadata.version("av")
+    if installed != FFMPEG_FOR_PYAV:
+        sys.exit(f"PyAV {installed} is installed, but the list of what its FFmpeg is made "
+                 f"of (FFMPEG_PARTS in {os.path.basename(__file__)}) was written for PyAV "
+                 f"{FFMPEG_FOR_PYAV}. Check the list and the licence texts against the new "
+                 "build, then change FFMPEG_FOR_PYAV.")
+    folder = os.path.join(out, "ffmpeg")
+    os.makedirs(folder, exist_ok=True)
+    lines = [
+        "FFmpeg and the libraries built into it (for video)",
+        "-" * 50,
+        f"These are the unchanged files of PyAV {installed}'s Windows package, in",
+        "_internal\\av.libs. They were built by the pyav-ffmpeg project:",
+        f"  {FFMPEG_BUILD}",
+        "which also holds the exact recipe (scripts) and the few patches it applies",
+        "(patches). The source code of each part, at the version used, is at the",
+        "address given with it. The licence texts are in licenses\\ffmpeg.",
+        "",
+        "x264 and x265 are under the GNU General Public License, so these libraries",
+        "are passed on here, together, under the GNU GPL version 3 -- which is also",
+        "CrystalX LCD's own licence (LICENSE.txt).",
+        "",
+    ]
+    for name, version, licence, url, files in FFMPEG_PARTS:
+        for file in files:
+            shutil.copyfile(os.path.join(HERE, "licenses", "ffmpeg", file),
+                            os.path.join(folder, file))
+        lines += [f"{name} {version}", f"  Licence: {licence}", f"  Source:  {url}"]
+        if files:
+            lines.append("  Text:    " + ", ".join(f"licenses\\ffmpeg\\{file}" for file in files))
+        lines.append("")
+    return lines
 
 
 if __name__ == "__main__":

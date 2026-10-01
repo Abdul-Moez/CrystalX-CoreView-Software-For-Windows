@@ -32,6 +32,7 @@ The pipe only accepts local clients, and only SYSTEM, administrators and the
 signed-in (interactive) user may open it.
 """
 
+import base64
 import json
 import os
 import sys
@@ -44,7 +45,7 @@ import win32pipe
 # The one place the version lives. The installer, the programs' file
 # properties and the About box all read it; the release build checks that
 # the git tag (v1.0.0) matches.
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 SERVICE_NAME = "CrystalXLCD"
 DISPLAY_NAME = "CrystalX LCD"
@@ -55,12 +56,18 @@ DATA_DIR = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"),
                         "CrystalX LCD")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 LOG_FILE = os.path.join(DATA_DIR, "service.log")
+# The media pool: every picture, GIF and video clip the playlists and saved
+# layouts use, each named after what is in it. Files being sent are staged in
+# INCOMING_DIR until the service has checked them.
+MEDIA_DIR = os.path.join(DATA_DIR, "media")
+INCOMING_DIR = os.path.join(DATA_DIR, "incoming")
 
-# Limits on a picture sent by the tray. Every GIF frame is held in memory at
-# panel size (about 1.4 MB each), so the frame cap keeps a long GIF from
+# Limits on a picture sent by the tray. Every GIF frame is held in memory, packed
+# (a photographic one takes up to 1 MB), so the frame cap keeps a long GIF from
 # eating gigabytes.
 MAX_PICTURE_BYTES = 50 * 2**20
 MAX_FRAMES = 300
+UPLOAD_CHUNK = 1 << 20              # files are sent in pieces of this many bytes
 
 _CHUNK = 64 * 1024
 _ERROR_FILE_NOT_FOUND = 2
@@ -107,6 +114,46 @@ def _connect(timeout_ms):
                 raise ConnectionError(
                     f"the service is not answering ({e.strerror})") from e
             time.sleep(0.1)
+
+
+class UploadCancelled(Exception):
+    """The person cancelled while a file was being sent."""
+
+
+def upload(send, path, kind, progress=None, cancel=None):
+    """Send the file at `path` to the service, in pieces, and return what the
+    service says about it once it has checked it and put it in the media pool:
+    {"file", "kind", "frames", "duration"}.
+
+    `send(cmd, **fields)` carries each message and returns the reply or raises
+    (the window's send_settings: it starts the service if it is off). `kind`
+    is "picture" or "clip". `progress(sent, total)` is told how far it is, and
+    `cancel`, an Event, stops it (UploadCancelled). Pieces go one message each,
+    in order, so nothing is ever held in full in memory.
+    """
+    total = os.path.getsize(path)
+    token = send("upload_begin", name=os.path.basename(path), size=total, kind=kind)["upload"]
+    try:
+        sent = 0
+        with open(path, "rb") as f:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise UploadCancelled()
+                block = f.read(UPLOAD_CHUNK)
+                if not block:
+                    break
+                send("upload_chunk", upload=token, offset=sent,
+                     data=base64.b64encode(block).decode("ascii"))
+                sent += len(block)
+                if progress:
+                    progress(sent, total)
+        return send("upload_end", upload=token)
+    except BaseException:
+        try:
+            send("upload_abort", upload=token)
+        except Exception:
+            pass
+        raise
 
 
 def request(cmd, timeout_ms=3000, **fields):

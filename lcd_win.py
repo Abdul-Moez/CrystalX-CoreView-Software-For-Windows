@@ -57,10 +57,11 @@ from PIL import Image, ImageFilter, ImageSequence
 VID, PID = 0x33C3, 0xF101
 MAGIC = 0x0008100A
 
-# Empirically determined on a CoreView V-950: 320x1476 (472k px) is stable,
-# 324x1494 (484k px) already tears, so this check is looser than the real
-# ceiling. See docs/HOW-IT-WORKS.md, constraint 2.
-MAX_PIXELS = 500_000
+# Empirically determined on a CoreView V-950: 320x1476 (472,320 px) is clean
+# and 324x1494 (484,056 px) already comes out scrambled. This sits just above
+# the largest size known to work, so nothing known to fail gets through.
+# Never raise it. See docs/HOW-IT-WORKS.md, constraint 2.
+MAX_PIXELS = 475_000
 
 # The largest frame measured clean on the panel. Pictures placed with a fit
 # mode go on a canvas of this shape, so any picture ends up within the limit.

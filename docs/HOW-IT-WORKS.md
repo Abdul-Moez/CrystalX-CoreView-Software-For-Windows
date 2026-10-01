@@ -19,6 +19,7 @@ quirks. They are written down so nobody has to rediscover them.
 - [Command-line options](#command-line-options)
 - [Stats slots](#stats-slots)
 - [Temperatures](#temperatures)
+- [Video](#video)
 - [The app: service, window and installer](#the-app-service-window-and-installer)
 - [Making a release](#making-a-release)
 - [Admin rights and autostart (scripts)](#admin-rights-and-autostart-scripts)
@@ -142,12 +143,12 @@ through 320/324/328/332/334 on the real panel while someone watched and reported
 which looked right. Only 320 was clean. **Do not repeat this experiment hoping
 for more width — it has been done.**
 
-> **Known gap:** `MAX_PIXELS = 500_000` in `lcd_win.py` was set before the
-> 324–332 rows were measured, so it is looser than the real ceiling. The scripts
-> refuse to run above 500,000 px, but **widths 324–329 pass that check and still
-> show a scrambled screen.** Treat 320 as the maximum regardless of what the
-> check allows. Lowering `MAX_PIXELS` to about `475_000` would close the gap.
-> **Never raise it.**
+`MAX_PIXELS = 475_000` in `lcd_win.py` enforces this: the scripts refuse
+anything larger, so nothing known to scramble gets through. (Until v1.2 it was
+500,000, a figure set before the 324–332 rows were measured, and widths
+324–329 passed the check and scrambled the screen.) It sits just above the
+largest clean size, so the untested widths 321 and 322 for the rooftop GIF's
+shape still pass; treat 320 as the maximum all the same. **Never raise it.**
 
 ### 3. The panel does not scale images up
 
@@ -201,11 +202,13 @@ on Windows and raises `ValueError: Invalid format string`.
 
 - Font, font sizes, text positions, margins
 - Which GIF is played, its FPS, JPEG quality
+- **The frame rate, up to 60.** The panel showed 10 to 120 frames a second
+  cleanly (see [The port](#the-port)); a video plays at up to 60
 - Clock and date formats (`--time-format`, `--date-format`; `TIME_FORMATS`
   and `DATE_CODES` in `clock_win.py`)
 - Which stats are shown (`--slots`) and how often they refresh
-- Width, **downwards only** — 320 is the maximum for the rooftop GIF, even
-  though `MAX_PIXELS` currently lets 324–329 through (see constraint 2)
+- Width, **downwards only** — 320 is the maximum for the rooftop GIF (see
+  constraint 2)
 
 ---
 
@@ -281,19 +284,20 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 | `AGENTS.md`, `CLAUDE.md` | Rules for AI coding assistants working on the repo |
 | **The engine** | |
 | `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, `fit_frame`, which `clock_win.py` imports. **The core driver — treat with care.** |
-| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. The service plays its `Show` and `Player`, the same ones `main()` uses, and its `preview()` draws the app's preview. |
+| `clock_win.py` | Overlay player: picture, GIF or video clip + clock + date + configurable stats. The service plays its `Show` / `VideoShow` and `Player`, the same ones `main()` uses, and its `preview()` draws the app's preview. |
+| `video_win.py` | Video: converts a video file into a clip the panel can be fed from (`convert`), plays a clip back (`ClipReader`), and is the helper process the window uses for both. See [Video](#video). |
 | `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
 | `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
 | `retro_pixel_guy_smoking_on_rooftop.gif` | The default picture |
 | **The app** | |
-| `service_win.py` | The Windows service: runs the engine from boot, answers the window over a pipe |
+| `service_win.py` | The Windows service: runs the engine from boot, plays the playlist, keeps the pictures and videos it is sent, answers the window over a pipe |
 | `tray_win.py` | The window and the notification-area icon |
-| `ipc_win.py` | Shared by both: the version, names, paths and pipe protocol |
-| `settings_win.py` | Shared by both: the display settings, their defaults and checks, the `clock_win` options they become, and saved layouts |
+| `ipc_win.py` | Shared by both: the version, names, paths and pipe protocol, and sending a file in pieces |
+| `settings_win.py` | Shared by both: the display settings (the playlist included), their defaults and checks, the `clock_win` options they become, and saved layouts |
 | `assets/` | The app icon and the script that draws it |
 | `packaging/crystalx-lcd.spec` | PyInstaller recipe: both programs, one folder, one bundled Python |
 | `packaging/installer.iss` | Inno Setup script for `CrystalX-LCD-Setup-<version>.exe` |
-| `packaging/collect_licenses.py`, `packaging/licenses/` | Gathers the licence of everything bundled into the app's `licenses` folder |
+| `packaging/collect_licenses.py`, `packaging/licenses/` | Gathers the licence of everything bundled into the app's `licenses` folder. `licenses/ffmpeg/` holds the texts for FFmpeg and each library built into it |
 | `packaging/requirements-build.txt` | Exact versions of the build-only tools |
 | `.github/workflows/release.yml` | Builds the installer and publishes the GitHub release when a version tag is pushed |
 | **The scripts** | |
@@ -331,8 +335,13 @@ Inside a `.cmd` file a `%` must be written twice, so `ram%` becomes `ram%%`
 (see the comment at the top of `run-clock.cmd`). On the command line a single
 `%` is fine.
 
-Everything the app's window can set is an option here too. The app turns its
-settings into exactly these options (`settings_win.engine_argv`):
+Everything the app's window can set about one picture is an option here too.
+The app turns its settings into exactly these options, once for each item of
+its playlist (`settings_win.engine_argv`); the playlist itself and the
+rotation of layouts are the service's doing, so a script shows one picture,
+GIF or clip. The source can be a clip made by `video_win.py convert` (see
+[Video](#video)); it then takes no `--fit`, `--zoom` or `--pan` options,
+because its placement was decided when it was converted.
 
 | Option | What it does |
 |---|---|
@@ -345,6 +354,8 @@ settings into exactly these options (`settings_win.engine_argv`):
 | `--time-color`, `--date-color`, `--label-color`, `--value-color` | Text colours (default white); the black outline always stays |
 | `--clock-pos 0–1`, `--stats-pos 0–1` | Height of the clock block and the stats block, from top (0) to bottom (1) |
 | `--slots`, `--columns 1\|2`, `--label SLOT=TEXT` | The stats, their layout and their names — see [Stats slots](#stats-slots) |
+| `--warn SLOT=WARNING:CRITICAL` (repeatable), `--warn-color`, `--crit-color` | Draw a stat's value in the warning colour once it reaches WARNING and in the critical colour at CRITICAL, e.g. `--warn cputemp=75:90`. For `cpu`, `gpu`, `ram%`, `disk%`, `storage`, `cputemp`, `gputemp` (`WARN_SLOTS`) |
+| `--own-speed` | Play a GIF at the speed it was made for (1 to 30 frames a second) instead of at `--fps` |
 | `--font`, `--no-frost`, `--frost-dark 0–1`, `--frost-blur` | Font file, and the frosted panel behind the text |
 | `--brightness 10–100` | Dim the whole screen to this percentage (see below) |
 | `--calendar month\|week`, `--week-start mon\|sun`, `--calendar-size`, `--calendar-color` | A calendar in the clock block, under the date (or in its place with `--no-date`); today is marked |
@@ -461,11 +472,15 @@ run-clock.cmd --width 280
 
 To play another GIF, change the file name in `run-clock.cmd`. A GIF with a
 different shape has a different maximum width. Pick a width where the startup
-line reports **472,320 px or fewer**. Don't rely on the "over the pixel limit"
-refusal: it only triggers above 500,000 px, and frames between ~480,000 and
-500,000 px pass it and still come out scrambled (constraint 2).
+line reports **472,320 px or fewer**; anything over 475,000 px is refused
+(constraint 2). With `--fit`, the width never needs thinking about.
 
-Images and GIFs only. Video would need ffmpeg.
+A GIF plays at `--fps` (10), whatever speed it was made for; `--own-speed`
+plays it at its own, read from its frames' durations and kept between 1 and 30
+frames a second (`own_fps`). Most GIFs are made for 10, so nothing changes for
+them.
+
+A video has to be converted first: see [Video](#video).
 
 ---
 
@@ -644,10 +659,155 @@ affected: files an installer writes carry no such mark.)
 
 ---
 
+## Video
+
+A video (MP4, MOV, MKV, WEBM, AVI... anything FFmpeg reads), up to 5 minutes,
+at up to 60 frames a second, without sound. FFmpeg comes with **PyAV**
+(`av`, pinned in `requirements.txt`); everything is in `video_win.py`.
+
+### Why a video is converted first
+
+The panel wants 320 × 1476 JPEGs, upside down. A GIF is brought to that once,
+when it loads, and its frames are then kept in memory. A video has too many
+pictures for that (5 minutes at 30 a second is 9,000), and shrinking a phone's
+4K picture 30 times a second, all day, costs far too much: turning one 4K
+frame into a picture that can be worked on takes 38 ms.
+
+So a video is converted **once**, when it is applied, into a **clip**: the
+pictures a GIF's frames would become — placed with fill or fit, zoomed and
+moved by the very same `lcd_win.fit_frame`, turned upside down — packed as
+H.264. Playing a clip then costs about 7 ms a picture, against 5 for a GIF
+(decoding it takes 1 ms; see [Performance](#performance)).
+
+Two things follow from that:
+
+- **Blurred edges cost nothing while playing.** They are part of the clip.
+  What does cost is the frosted panel behind the text, which has to be made
+  for every picture; a video gets a cheaper one (see below).
+- **A clip's placement is fixed.** Moving, zooming or refitting a video means
+  converting it again, from the video file.
+
+### The clip file (`.cxv`)
+
+Our own format, not MP4: the H.264 packets, one per picture, with an index.
+
+```
+"CXV1" | u32 header length | JSON header, padded to 2048 bytes
+one record per picture:  u32 size | u8 flags (1 = key picture) | H.264 packet
+index:  u64 offset of every record
+footer: u64 offset of the index | "CXVE"
+```
+
+The service runs as SYSTEM and plays files that another program may have sent
+it. With this format it needs **only FFmpeg's H.264 decoder**, fed packet by
+packet, and none of FFmpeg's file readers (the part of FFmpeg that parses MP4,
+MKV and the rest, and where most of its security fixes land). The header says
+the size, the frame rate as a fraction and the number of pictures; the first
+packet of each key picture carries the decoder's own parameters, so nothing
+else is needed. There are no B-frames (`bf=0`), so the pictures come out in
+the order they went in, and a key picture every 2 seconds, so going to any
+moment means decoding 2 seconds at most.
+
+### Converting (`video_win.convert`)
+
+1. FFmpeg decodes the video.
+2. Each frame is turned into RGB, no larger than 1920 px (`_to_picture`),
+   honouring what the file says about itself: rotation (phones store a
+   portrait video sideways), pixels that are not square, and the colour matrix
+   (a file that does not say gets BT.709 if it is HD, BT.601 if not, as
+   players assume). HDR video is not tone-mapped: it comes out washed out,
+   and the window says so.
+3. It is placed (`fit_frame`), turned upside down and handed to x264 (`crf 21`,
+   preset `faster`).
+
+The frame rate is the video's own, capped at `max_fps` (30 or 60). The clip
+always has a **steady** rate, because the player counts time rather than
+pictures: a video whose frames come at uneven times has pictures repeated or
+skipped to fit. A video longer than 5 minutes, or one that stops before the
+length it claims (a download that was cut off decoded 112 of 600 frames
+without any error from FFmpeg), is refused with a message for the person.
+
+Steps 2 and 3 run on several threads. One detail made that work: handing
+Pillow a three-byte RGB frame copies it, slowly and one thread at a time (5 ms
+for 1080p, more than the conversion itself). A four-byte frame (`rgb0`) is
+used by Pillow where it lies, as `RGBX`, with no copy.
+
+Measured, 10 seconds of 1080p at 60 frames a second into a 30-frames-a-second
+clip: 2.9 s with Fill, 4.0 s with blurred edges; into a 60-frames-a-second
+clip, 5.0 s. A 5-minute video therefore takes one to four minutes. The clip of
+that test video is 2.2 MB (66 MB for 5 minutes); real footage is larger, and a
+clip over 600 MB is refused.
+
+### Playing (`VideoShow`, `Player._play_video`)
+
+For each picture: decode it (`ClipReader.read`), frost the panels behind the
+text, dim it, lay the text over it, encode it as JPEG, send it. Four things
+differ from playing a GIF, all because nothing can be prepared in advance and
+the rate is higher:
+
+- **Time, not a count.** The picture sent is the one the clock says is due. If
+  sending falls behind, pictures are skipped (decoded, since later ones need
+  them, but not turned into pictures), so the video keeps its speed instead of
+  running slow. At the end, the decoder is flushed and fed from the first
+  record again.
+- **Exact pacing** (`Pacer`). Windows' ordinary sleeps end on the system
+  timer's 15.6 ms ticks, so a 33 ms wait takes 47 and "30 frames a second"
+  comes out as 21. A high-resolution waitable timer is accurate to about a
+  millisecond without changing the system timer for anyone else. (The GIF
+  loop still sleeps the ordinary way, which is why its 10 a second is really
+  9.3; it was left exactly as it was.)
+- **The text has its own thread** (`TextLayer`). Every 2 seconds the readings
+  are taken (11 ms, up to 40) and the text is drawn (7 ms). At 10 frames a
+  second nobody sees that; at 30 it would make one picture late every two
+  seconds. The blocks that a GIF has drawn into its frames (text, countdown,
+  to-do list, calendar) are part of this layer for a video.
+- **A cheaper frosted panel** (`frost_fast`): the blur is made on a
+  quarter-size copy and scaled back up, which behind dark text looks the same.
+  It takes 1.7 ms a picture where the full blur a GIF gets takes 4.8: at 30
+  frames a second, 5% of one core instead of 14%.
+
+FFmpeg is loaded when the first clip is played and stays in the process; a
+service that only ever shows pictures and GIFs never loads it.
+
+### In the window
+
+The window never loads FFmpeg. It takes about 45 MB, and a file that crashes
+it would take the window along. Looking at a video and converting it are done
+by a **helper process**: the same program started with `--video-worker`
+(`video_win.Worker`; from source, `video_win.py worker`). It is started when a
+video is first looked at, runs at below-normal priority while converting, and
+ends when the window is hidden. Cancel simply ends it, and so does Quit.
+
+The preview of a video that is not applied yet is drawn from the video itself,
+placed by the item's settings, with the frost the player will use — so it
+shows what the clip will show, and can be dragged like a picture. Once
+applied, the window remembers which file each clip came from until the app is
+closed, and goes on drawing from the video so it can still be moved; after
+that, the preview is drawn from the clip and the placement is fixed.
+
+**Play** steps through the pictures by the clock, ten times a second, skipping
+what it has no time to draw. A helper that keeps the file open and decodes on
+from where it was gives the next picture in about 10 ms.
+
+### What was tried and dropped
+
+- **The graphics card.** FFmpeg can decode on it (`d3d11va` and `dxva2` work
+  on the test PC's RX 580), but each frame then has to be copied back, and it
+  came out slower than the processor every time: 1080p 3.1 ms against 0.8,
+  4K HEVC 11 against 3.8, a heavy 92 Mbit/s 4K file 12 against 8. Decoding was
+  never the cost; turning frames into RGB is, and the card does not do that
+  for us.
+- **A file of JPEG frames** instead of H.264. The service would then need
+  nothing new at all, but 5 minutes at 30 frames a second took 0.55 to 1.2 GB,
+  and every saved layout would refer to that much.
+- **Reopening the clip at each loop** made the process grow by 30 MB a time.
+
+---
+
 ## The app: service, window and installer
 
 The installed app is the same engine (`clock_win.py`, `lcd_win.py`,
-`temps_win.py`) wrapped in two programs:
+`video_win.py`, `temps_win.py`) wrapped in two programs:
 
 ```
    CrystalXLCD.exe (tray_win.py)                CrystalXLCD-Service.exe (service_win.py)
@@ -655,14 +815,15 @@ The installed app is the same engine (`clock_win.py`, `lcd_win.py`,
   +---------------------------+   named pipe   +------------------------------+
   | window + tray icon        | -------------> | pipe server                  |
   | status, start/stop,       |  JSON, local   | Display thread:              |
-  | picture, options          |  users only    |   clock_win.Show + Player    |
-  +-------------+-------------+                |   retries when the panel is  |
-                | start / stop                 |   busy or missing            |
-                v                              +--------------+---------------+
-      Windows service manager  ------------------------------>|
-                                                              v
-                                              COM port -> panel,  LibreHardwareMonitor
-                                              C:\ProgramData\CrystalX LCD\ (settings, picture, log)
+  | playlist, options         |  users only    |   clock_win.Show + Player    |
+  +------+------+-------------+                |   retries when the panel is  |
+         |      | start / stop                 |   busy or missing            |
+         |      v                              +--------------+---------------+
+         |    Windows service manager  ---------------------->|
+         v                                                    v
+   helper process                             COM port -> panel,  LibreHardwareMonitor
+   (--video-worker): FFmpeg                   C:\ProgramData\CrystalX LCD\ (settings,
+   looks at and converts videos                pictures and videos, layouts, log)
 ```
 
 **Why a service.** It starts at boot, so the clock is up on the login screen,
@@ -679,23 +840,39 @@ each way (`ipc_win.request`). If the display is off, the window starts the
 service with the argument `--idle`: it then only applies settings, touches no
 hardware, and stops itself 20 seconds after the last request.
 
-The settings (`settings_win.py`) are the **picture** — a file the service keeps
-— and the **look**: everything else that decides what the screen shows (fit,
-zoom and pan, clock and date formats, sizes, colours, positions, the seven stat
-spots and their names, font, frosted panel, brightness, the calendar, and the
-text, countdown and to-do blocks with what is written in them). Hiding the
-time, the date, the stats (`show_stats`) or one of those blocks keeps its
-other settings for when it is shown again.
-They live in `config.json`; a v1.0
-file, with only the picture and fit, loads with defaults for the rest.
+The settings (`settings_win.py`) are one **look**: everything that decides
+what the screen shows. That is the **playlist** — the pictures, GIFs and videos
+behind the clock, each with its own placement (fit, zoom and pan) and timing —
+and what is over them: clock and date formats, sizes, colours, positions, the
+seven stat spots, their names and warning colours, font, frosted panel,
+brightness, the calendar, and the text, countdown and to-do blocks with what
+is written in them. Hiding the time, the date, the stats (`show_stats`) or one
+of those blocks keeps its other settings for when it is shown again. The look
+lives in `config.json`, with one setting beside it that belongs to the app and
+not to any layout: whether saved layouts rotate.
+
+A playlist item names its file, never a path: `"default"` (the bundled GIF) or
+`media/<20 hex digits>.<type>`, a file in the **media pool**
+(`C:\ProgramData\CrystalX LCD\media`), named after what is in it. Every
+picture, GIF and clip the playlist or any saved layout uses is in the pool
+once, so layouts cost nothing in pictures however many share them. What nothing
+uses any more is deleted, ten minutes after it was last wanted (`gc_media`).
+
+Settings from before v1.3 had one picture (`picture.<ext>`) with its placement
+in the look, and layouts kept a copy of their picture beside them. They load
+as a playlist of that one picture, placed the same way (`config_from`,
+`read_layout`); when the service starts it moves those files into the pool
+and rewrites the settings (`migrate_media`). Nothing changes on the screen.
 
 | Command | What the service does |
 |---|---|
-| `apply` | Stores the look, and optionally a new picture (sent as bytes) or `"default"`, then builds the new look and swaps it in (see below). The window's one **Apply** button sends everything in this one message |
-| `save_layout`, `load_layout`, `delete_layout` | A **saved layout** is `layouts\<n>.json` (n = 1–10) with the look, plus `<n>.<ext>`, its own copy of its picture. Saving takes what is on the screen, so the window applies unsaved changes first |
+| `upload_begin`, `upload_chunk`, `upload_end`, `upload_abort` | Take one file from the window, in pieces of 1 MB: a picture or GIF, or a clip the window has converted. It is staged under a random name, checked when complete, and moved into the media pool; the reply to `upload_end` is the name to use in the playlist |
+| `apply` | Stores the look, whose playlist names files already sent, then builds it and swaps it in (see below). The window's one **Apply** button converts and sends what is new, then sends this |
+| `save_layout`, `load_layout`, `delete_layout` | A **saved layout** is `layouts\<n>.json` (n = 1–10): a name and a look. Saving takes what is on the screen, so the window applies unsaved changes first |
+| `set_rotation` | Switches the rotation of saved layouts on or off, and sets how often |
 | `todo` | Ticks, unticks or removes one to-do item (found by its `id`), or removes every ticked one — straight from the window, without the rest of the form. New and edited items go with `apply` |
 | `set_autostart` | Switches the service between automatic and manual start |
-| `status` | What the display is doing, for the window's status line |
+| `status` | What the display is doing, and which playlist item is on, for the window's status line |
 
 **Changing settings never pauses the screen.** Preparing the frames for a new
 look takes a second or two for a GIF. Up to v1.1.0 the display stopped
@@ -704,12 +881,45 @@ new look (`clock_win.Show`) in the background while the old one keeps playing,
 then hands it to the player (`Player.swap`): measured, the longest gap between
 frames during a swap was about 140 ms against the usual 100–110 ms. The same
 swap redraws the calendar and countdown at midnight (see
-[The extra blocks](#the-extra-blocks)). The service keeps one
-LibreHardwareMonitor open across swaps rather than reopening it each time.
+[The extra blocks](#the-extra-blocks)); if building the new look fails then,
+it is tried again every minute. The service keeps one LibreHardwareMonitor
+open across swaps rather than reopening it each time.
+
+**The playlist** is played by the same swap (`service_win.Display`). An item
+has had its turn after its seconds (a still picture) or after playing through
+its number of times (a GIF or video; never less than 2 seconds). Twenty
+seconds before that, the next item is made ready in the background, and the
+player is told to swap to it at that moment (`Player.swap(show, at=...)`): the
+longest gap between two pictures across a change measured 134 ms. Only one
+item's frames are in memory except during those twenty seconds. With
+**shuffle**, the order is mixed afresh each time round. An item that cannot be
+shown (a damaged file) is left out and the rest carry on.
+
+With one item and no rotation there is nothing to decide, and nothing extra
+runs: a single picture or GIF plays exactly as it did before playlists.
+
+**Rotating layouts.** When it is on, the look changes to the next saved
+layout (in the order of the list) once its minutes are up — at the end of the
+item then playing, so a video is not cut off. `config.json` is rewritten with
+it, so the window shows what is on the screen. Loading a layout by hand starts
+the count again from that layout.
+
+**If a clip ever crashes the decoder**, the service must not die at every
+start (`service_win.Guard`). While a video plays, its name is kept in
+`playing.json`; a service that starts and finds a clip named there knows what
+it was doing when it ended. Usually that is innocent: the PC was switched off,
+and Windows ends a service then without telling it. So one such end counts for
+nothing. A clip is left out (and the log says so) only when the service has
+ended **twice running** while playing it, and never once it has been seen to
+play right through; applying settings gives it another go. A clip that merely
+stops decoding while it plays is left out for the rest of that run, and the
+display carries on at once with the rest of the playlist.
 
 The window reads `config.json` and the layout list straight from the folder
 (users may read it), so it shows the settings even while the service is
-stopped.
+stopped. (Windows refuses to replace a file at the moment someone is reading
+it, so the service's writes and the window's reads both try again for a
+moment.)
 
 **Security.** The service runs as SYSTEM, so everything a normal user can reach
 is kept narrow:
@@ -720,8 +930,11 @@ is kept narrow:
 | Users may **start and stop** the service, nothing more (`SERVICE_SDDL`) | Changing its configuration would let a user point a SYSTEM service at their own program |
 | The pipe accepts local clients only: SYSTEM, administrators and the signed-in user | No remote access |
 | The first pipe instance claims the name (`FILE_FLAG_FIRST_PIPE_INSTANCE`) | Nothing else can create the pipe first and pose as the service |
-| The window never sends a file path — it reads the picture and sends the bytes | Otherwise any program could get SYSTEM to open files on its behalf |
+| The window never sends a file path — it reads each file and sends the bytes | Otherwise any program could get SYSTEM to open files on its behalf |
+| A playlist item's file is `"default"` or a name matching `MEDIA_FILE`, and must exist in the pool | The names come from the service itself (made from the file's content); nothing the window says is ever used as a path or a name |
 | The service checks every picture (format, size ≤ 50 MB, ≤ 300 frames) and keeps its own copy | Every frame is held in memory (packed), so an endless GIF could otherwise eat gigabytes |
+| A video reaches the service only as a clip, already converted by the window. It is checked (`check_clip`: structure, panel size, rate, length ≤ 5 min, size ≤ 600 MB, first and last picture decode) and played with FFmpeg's H.264 decoder alone | The window, as the user, is what opens the user's video with all of FFmpeg; SYSTEM only ever runs one decoder on a file of a shape it has checked (see [Video](#video)) |
+| The media pool holds at most 4 GB, and a file is only accepted while the disk keeps 512 MB free | A program talking to the pipe can't fill the system drive |
 | `C:\ProgramData\CrystalX LCD` is writable only by SYSTEM and administrators | A user can't plant a picture or settings file for the service to read |
 | Every setting, from the pipe or from a file, goes through `settings_win.clean_look` | Only known keys, types and ranges reach the engine; anything else falls back to its default |
 | Fonts are only taken from `C:\Windows\Fonts`, by file name | The service never opens a path the user chose; fonts installed for one user only are therefore not offered |
@@ -746,12 +959,23 @@ readings instead of the sensors — so it shows exactly what the panel will show
 It redraws on every change in 15–50 ms, and never queues redraws: while one
 runs, only the newest waits.
 
+- **The Picture tab** is the playlist: a list, and under it the settings of
+  the item picked in it, which is also the item the preview shows. Until it
+  is applied, a new item carries the path of the file that was picked (for
+  the window only: the service never sees it). **Apply** converts the new
+  videos (in the helper process, with a progress window and Cancel), sends
+  every new file, and then the look. All videos are converted before anything
+  is sent, so the files reach the service together, just before they are used.
 - **Dragging** on the preview moves a block up or down when grabbed inside
   its box (the clock, the stats, or the text, countdown or to-do block; from
   the layout's `boxes`), and the picture anywhere else; the wheel zooms around the
-  pointer. The preview works from the picture's first frame, opened once and
-  scaled down to 2048 px at most (placement is in proportions, so it looks the
-  same).
+  pointer. The preview works from one picture of the item, kept until another
+  is wanted and scaled down to 2048 px at most (placement is in proportions,
+  so it looks the same).
+- **The slider and Play** under the preview show any moment of a GIF or video.
+  Nothing plays by itself: playing redraws the preview ten times a second
+  (see [Performance](#performance)), which the open window otherwise never
+  does.
 - **Size sliders** stop at the largest size that fits (`Layout.limits`);
   sizes and positions left automatic show what the engine chose.
 - **The free space**: the tallest empty band between the blocks (with the
@@ -766,7 +990,8 @@ runs, only the newest waits.
 It starts hidden with `--hidden` (at login); starting it again (Start menu)
 tells the running copy to show its window. While hidden it only keeps the
 tray tooltip up to date: it reads neither the settings nor the layouts, draws
-nothing, and lets go of the preview's picture.
+nothing, and lets go of the preview's picture, an open GIF and the helper
+process (`MainWindow.release`).
 
 **The installer** (`packaging/installer.iss`, Inno Setup):
 
@@ -782,7 +1007,9 @@ nothing, and lets go of the preview's picture.
 - on uninstall, stops everything, deletes the service and
   `C:\ProgramData\CrystalX LCD`. If there are saved layouts it first asks
   whether to delete them too (No is the default; a silent uninstall keeps
-  them); kept, only the `layouts` folder stays, and a reinstall picks them up.
+  them); kept, the `layouts` folder stays, and with it `media`, which holds
+  their pictures and videos, and a reinstall picks them up (the service then
+  clears out of `media` what no layout uses).
   This is done in `CurUninstallStepChanged`, because `[UninstallDelete]` cannot
   depend on a question. PawnIO is left in place: it is a shared driver with its
   own uninstaller.
@@ -809,7 +1036,9 @@ service* rather than as nameless Python processes.
 3. `.github/workflows/release.yml` then, on a fresh Windows machine:
    - checks the tag matches `VERSION`, and that Python is not 3.13.0;
    - installs the exact build tools from `packaging/requirements-build.txt`;
-   - builds the two programs with PyInstaller and collects the licences;
+   - builds the two programs with PyInstaller and collects the licences
+     (`collect_licenses.py` stops the build if PyAV is not the version its
+     list of FFmpeg's parts was written for — see `FFMPEG_FOR_PYAV` there);
    - downloads PawnIO 2.2.0 and Inno Setup 7.1.0, and refuses to continue
      unless both match their SHA-256 fingerprints and carry valid signatures;
    - builds `CrystalX-LCD-Setup-<version>.exe` and its `.sha256` file, and
@@ -823,6 +1052,15 @@ to test a change to the build.
 permissive licence. WiX 7 was considered for a `.msi`, but its prebuilt tools
 require accepting an Open Source Maintenance Fee EULA; Inno Setup was chosen to
 avoid that, and because running PawnIO's own installer is a normal step for it.
+
+**FFmpeg's licences.** FFmpeg and the libraries built into it arrive inside
+PyAV's package (`av.libs`), unchanged. Two of them, x264 and x265, are under
+the GNU GPL (version 2 or later), so together they are passed on under the
+GPL version 3, which is this project's licence too. The installer carries the
+licence text of every one of them (`packaging/licenses/ffmpeg`, fetched from
+the very source versions used) and, in `licenses\THIRD-PARTY-NOTICES.txt`,
+where the source of each is, with the recipe they were built by. Video adds
+18.5 MB to the installer (21.6 MB to 40.1 MB).
 
 To build the installer locally, see the header of `packaging/installer.iss`.
 
@@ -921,6 +1159,72 @@ within noise: the new blocks are drawn into the frames when they are
 prepared, never per frame. With everything on, preparing the frames takes
 0.5 s longer (2.8 s) and 9 MB more at its peak, once per Apply and at midnight.
 
+**v1.3.0** (same machine and method, 2026-10-01) adds video, the playlist,
+rotating layouts and warning colours. The first question was whether pictures
+and GIFs pay for any of it. They do not: the picture loop was left as it was,
+and what it sends is byte for byte what v1.2.0 sent (see `AGENTS.md`,
+Testing).
+
+| Picture | v1.2.0 CPU | v1.3.0 CPU | v1.2.0 RAM | v1.3.0 RAM |
+|---|---|---|---|---|
+| Rooftop GIF, the default (11 pairs of runs) | 4.9% of one core | 5.1% | 81–87 MB | 82–83 MB |
+| A 300-frame GIF of photographs | 6.5% | 7.4% | 303 MB | 303 MB |
+| A still picture (4 pairs) | 0.9% | 1.0% | 75 MB | 75 MB |
+
+Single runs of the rooftop GIF came out anywhere from 4.3% to 5.7%, for either
+version, and which of the two was ahead changed from one batch to the next.
+Counting the work settles it: in 45 seconds both drew the text 22 or 23 times
+and encoded 417 to 419 frames, at 5.0 to 5.7 ms of processor time per frame
+for both. (The same work takes more processor time when the processor is
+running slower, which is where the spread comes from. So compare versions in
+alternating pairs, never one run against one.) The 300-frame row is one pair,
+so its difference is within that spread too. That GIF takes 303 MB in both
+versions because photographs pack far less well than the flat colours of the
+GIF measured for v1.1.0.
+
+**Video** (a 10-second 1080p test video converted with Fill; all seven stats,
+live sensors):
+
+| | CPU | Frames a second | RAM |
+|---|---|---|---|
+| A clip at 30 frames a second | 23–25% of one core | 30.0 | 91 MB |
+| A clip at 60 frames a second | 50% | 59.5 | 92 MB |
+| A GIF, before any video has played | 4.7% | 9.3 | 82 MB |
+| The same GIF, after a video has played | 4.8% | 9.4 | 107 MB |
+
+A quarter of one core is 2% of this 12-thread processor; half a core is 4%.
+That is five to ten times what a GIF takes: video is for a screen to enjoy
+while the PC is not busy with something heavy. FFmpeg is loaded when
+the first clip plays and stays for as long as the service runs: 25 MB that a
+GIF following a video still carries, and that a service showing only pictures
+never loads.
+
+Where a clip's 7 ms a picture goes (a GIF's frame takes about 5):
+
+| Step | Time |
+|---|---|
+| Decode the H.264 picture | 0.8–1.2 ms |
+| Make it a picture Pillow can draw on (to RGB) | 2.3 ms |
+| Frost the two panels (`frost_fast`; the full frost would be 4.8 ms) | 1.7 ms |
+| Lay the text over it | 0.3 ms |
+| JPEG encode | 1.7 ms |
+
+**The window app in v1.3.0:**
+
+| Moment | v1.2.0 | v1.3.0 |
+|---|---|---|
+| Hidden in the tray, as at login | 0.0%, 43 MB | 0.1%, 45 MB |
+| Open, idle | 0.0%, 49 MB | 0.0%, 53 MB |
+| Open, a video picked in the playlist (paused) | — | 0.0%, 61 MB, and 163 MB in the helper process |
+| Open, the video playing in the preview | — | 23% of one core, and 47% in the helper |
+| Hidden again | 0.0%, 48 MB | 0.1%, 57 MB |
+
+The helper process is where FFmpeg lives (see [Video](#video)): it exists only
+while a video is being looked at or converted, and hiding the window ends it.
+The preview plays only when Play is pressed.
+
+**The installer** grew from 21.6 MB to 40.1 MB: FFmpeg.
+
 ### Where the display's time goes
 
 v1.0.0 did everything for every frame sent: frost the two panels, draw the
@@ -959,6 +1263,23 @@ USB write of a frame (≈107 KB) takes about 6.7 ms of waiting, not CPU. The
 port sustains **15.5 MB/s**; at 10 FPS the GIF needs 0.67 MB/s, so there is an
 enormous margin — frame rate is not a constraint on this transport.
 
+**Nor on the panel, up to 60 frames a second.** Measured on the panel on
+2026-10-01 with a test pattern (grid, diagonals, coloured corners, a frame
+counter and a bar sweeping down the screen every 2 seconds), someone watching:
+
+| Frames | Asked for | Delivered | Each write |
+|---|---|---|---|
+| Test pattern, 76 KB | 10, 20, 30, 40, 50, 60, 90 a second | exactly that | 4.8–6.6 ms |
+| | 120 | 114 | 8.4 ms |
+| Over a frame of video, 149 KB | 30, 45, 60 | exactly that | 11.3–13.2 ms |
+| | 75, 90 | 73 | 13.4 ms |
+
+Every rate looked clean: no tearing, no scrambling. The time a write takes is
+the panel taking the frame in, so it is what sets the ceiling: about 73
+video-sized frames a second. At 60 the panel is busy four fifths of the time,
+at 30 a third. Whether the glass shows more than 60 different pictures a
+second was not established, and a video is played at 60 at most.
+
 ### How to measure
 
 Run the same loop the service plays, with the same options
@@ -994,9 +1315,30 @@ very first attempt — the frame simply needed to keep being sent. Measure befor
 changing anything: if `write()` returns at ~15 MB/s with `out_waiting == 0`,
 the bytes reached the device and the fault is elsewhere.
 
-**Raising the width past 320 because `MAX_PIXELS` seemed to leave room.** The
-500k figure was a rounded guess; the panel already corrupts at 324 × 1494
-(484,056 px). Tested on the hardware on 2026-09-29 — see constraint 2.
+**Raising the width past 320 because `MAX_PIXELS` seemed to leave room.** Its
+old value, 500,000, was a rounded guess; the panel already corrupts at
+324 × 1494 (484,056 px). Tested on the hardware on 2026-09-29 — see
+constraint 2. `MAX_PIXELS` is 475,000 now.
+
+**Playing a video straight from its file**, decoding and shrinking it as it
+plays. Turning one 4K frame into a picture costs 38 ms, 30 times a second, all
+day. A video is converted once instead — see [Video](#video), which also lists
+what else was tried for it (the graphics card, a file of JPEG frames).
+
+**Pacing 30 frames a second with an ordinary sleep.** `time.sleep` and
+`Event.wait` end on Windows' 15.6 ms timer ticks: a 33 ms wait takes 47, and
+30 frames a second come out as 21. (The same thing makes the GIF loop's 10 a
+second really 9.3.) A high-resolution waitable timer keeps time; see
+`clock_win.Pacer`.
+
+**Handing Pillow a decoded video frame as three-byte RGB**
+(`frame.to_image()`). It is copied, on one thread at a time, which made the
+converter no faster with eight threads than with four. See
+`video_win._to_picture`.
+
+**Loading FFmpeg into the window.** It stays for as long as the app runs
+(about 45 MB), and a file that crashes it would take the window along. The
+window uses a helper process instead.
 
 **Reading the vendor app's code to learn its commands.** It is obfuscated; see
 [What the vendor app revealed](#what-the-vendor-app-revealed).

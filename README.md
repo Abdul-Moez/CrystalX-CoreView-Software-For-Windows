@@ -1,6 +1,6 @@
 # CrystalX CoreView LCD for Windows
 
-Show an animated GIF or your own picture with a clock, the date and live PC
+Show your own pictures, GIFs or videos with a clock, the date and live PC
 stats (CPU and GPU usage and temperature, RAM, drives, network) on the LCD
 screen of a **CrystalX CoreView V-950** PC case — without the vendor's LCD
 Control app.
@@ -67,7 +67,8 @@ Open **CrystalX LCD** from the Start menu, or click its icon near the clock
 
 The window has everything in one place. On the left is a **preview** of the
 screen, with example readings. It updates as you change things, and nothing
-reaches the case screen until you click **Apply**.
+reaches the case screen until you click **Apply**. Under the preview, the
+slider shows any moment of a GIF or video, and **Play** plays it there.
 
 At the top, **Display** shows what the screen is doing, for example *Showing
 on COM5*. **Stop display** turns the screen off and frees it for other
@@ -76,14 +77,38 @@ admin prompts.
 
 Below it are six tabs:
 
-- **Picture** — **Choose file…** to use your own GIF or picture (GIF, PNG,
-  JPEG, WEBP or BMP), or **Use default** for the rooftop GIF.
-  - **Fill** crops it to cover the whole screen. **Fit** shows the whole
-    picture, with the empty space filled by **blurred edges** or a **solid
-    colour** you pick.
-  - **Drag the preview** to choose which part of the picture shows, and
-    **scroll on it** (or use the **Zoom** slider) to zoom in, up to 4×.
-    **Reset position** centres it again.
+- **Picture** — what shows behind the clock: one picture, or a **playlist** of
+  pictures, GIFs and videos shown one after another.
+  - **Add…** picks one or more files: pictures and GIFs (GIF, PNG, JPEG, WEBP
+    or BMP) and **videos** (MP4, MOV, MKV, WEBM, AVI and most others) up to
+    **5 minutes** long — trim a longer one first. The first file you add
+    takes the place of the rooftop GIF; **Add default** puts that back.
+    **Remove**, **Up** and **Down** change the list, and **Shuffle the order**
+    mixes it afresh each time round. Up to 20.
+  - **Click an item** in the list to see it in the preview and set it up.
+    Each has its own settings:
+    - **Fill** crops it to cover the whole screen. **Fit** shows the whole
+      picture, with the empty space filled by **blurred edges** or a **solid
+      colour** you pick. The screen is tall and narrow, so with Fill a wide
+      video shows only its middle strip; Fit shows all of it, smaller.
+    - **Drag the preview** to choose which part shows, and **scroll on it**
+      (or use the **Zoom** slider) to zoom in, up to 4×. **Reset** centres it
+      again.
+    - How long it stays before the next one: a still picture for a number of
+      **seconds**, a GIF or video a number of **times** through. With only
+      one item in the list, it simply keeps playing.
+    - A video: **Limit to 30 frames a second** is on to start with, which is
+      lighter on the PC. Switch it off to play a 60-frames-a-second video at
+      its full rate. Videos play without sound.
+    - A GIF: **Play at the GIF's own speed**, for GIFs made to run faster
+      than the usual 10 frames a second.
+  - **Videos are converted when you click Apply.** A small window shows how
+    far it is, with a **Cancel** button; a 5-minute video takes a few
+    minutes. The case screen keeps showing what it shows now until it is
+    done.
+  - To move, zoom or refit a video later, the app needs the video file
+    again. While the app stays open it remembers where it was; after that,
+    add the video once more.
   - The best picture size is **320 × 1476 px**, or larger in the same tall
     shape. The tab shows your picture's size and warns you if it's small
     enough to look blurry.
@@ -111,6 +136,11 @@ Below it are six tabs:
   - **One per row** gives each reading its own line with much bigger numbers.
   - Size sliders and colours for the names and the numbers, and **Height on
     screen** (or drag the block in the preview).
+  - **Warning colours…** makes a number change colour when it gets high. For
+    CPU, GPU, RAM, disk and storage use and for the two temperatures, tick
+    the ones you want and give each a *warning* and a *critical* level: the
+    CPU temperature can turn orange at 75°C and red at 90°C, for example.
+    You can pick the two colours too.
 - **Extras** — things of your own to add, each switched on separately. The
   text, the countdown and the to-do list each have their own size, colour,
   alignment (left, centre or right), frosted panel on or off and height on the
@@ -135,15 +165,20 @@ Below it are six tabs:
 - **Options**
   - **Start display with Windows** decides whether the clock comes on by
     itself when the PC starts.
-  - **Saved layouts**: **Save as…** keeps everything on the screen, the
-    picture too, under a name. **Load** brings it back. Up to 10.
+  - **Saved layouts**: **Save as…** keeps everything on the screen, its
+    pictures and videos too, under a name. **Load** brings it back. Up to 10.
+  - **Change layout every … minutes** goes through your saved layouts in
+    turn, changing when the picture or video that is playing has finished.
+    While it is on, a change you apply lasts until the next change of layout,
+    unless you save it as a layout.
 
-Applying never interrupts the screen: it keeps showing the old look for the
-second or two the new one takes to prepare, then switches.
+Applying never interrupts the screen: it keeps showing the old look for as
+long as the new one takes to prepare, then switches.
 
-**Reset to defaults** puts the look back as it came, but keeps your picture and
-what you wrote (the text, the countdown and the to-do list — their blocks are
-just switched off).
+**Reset to defaults** puts the look back as it came, but keeps your playlist
+(the pictures and videos, and how each is placed and timed) and what you
+wrote (the text, the countdown and the to-do list — their blocks are just
+switched off).
 **Undo changes** goes back to what's on the screen now.
 
 **Open log** shows what the app has been doing — useful if something goes
@@ -162,15 +197,16 @@ screen and can't be changed. The app takes over as soon as Windows starts.
 
 **To update:** download the newer `CrystalX-LCD-Setup-<version>.exe` from the
 [releases page](https://github.com/Abdul-Moez/CrystalX-CoreView-Software-For-Windows/releases)
-and run it. Your picture, settings and saved layouts are kept.
+and run it. Your pictures and videos, settings and saved layouts are kept.
 
 **To uninstall:** open **Settings → Apps**, find **CrystalX LCD** and click
 **Uninstall**. This removes the app, the service, the Start menu entry, the
-icon at login, and your chosen picture, settings and log.
+icon at login, and your pictures and videos, settings and log.
 
 If you have **saved layouts**, it asks whether to delete them too. Choose
-**No** to keep them: they stay in `C:\ProgramData\CrystalX LCD\layouts` and
-come back if you install the app again.
+**No** to keep them, with their pictures and videos: they stay in
+`C:\ProgramData\CrystalX LCD` (the `layouts` and `media` folders) and come
+back if you install the app again.
 
 **PawnIO stays installed** on purpose: it's a shared driver that other
 programs (for example LibreHardwareMonitor or FanControl) also use. If you
@@ -254,6 +290,28 @@ PawnIO), or install it from **https://pawnio.eu/**.
 That reading isn't available on your PC (for example, no GPU counters), or the
 display has only just started — speed readings need two samples.
 
+**"That video is … minutes long"** (when adding a video)
+The screen takes videos up to 5 minutes long. Cut it shorter first (the
+Photos app or Clipchamp that come with Windows can), then add the shorter file.
+
+**"The video stops at … seconds although it should last …"**
+The video file is cut short or damaged, often from an unfinished download or
+copy. Get the file again and add it once more.
+
+**A video shows only a narrow strip of its picture**
+The case screen is tall and narrow. With **Fill**, a wide video is cropped to
+its middle strip; drag the preview to choose which strip, or pick **Fit** to
+see all of it, smaller.
+
+**A video's colours look washed out**
+It is an HDR video (many phones record these), and the app shows it without
+HDR processing. Record or export it as a normal (SDR) video.
+
+**A video stutters, or the PC feels busier while it plays**
+Keep **Limit to 30 frames a second** switched on for that video, and click
+Apply again. A video is the heaviest thing the screen can show; a GIF or a
+picture costs far less.
+
 **"Windows protected your PC" when running the installer**
 Expected for now: the installer isn't code-signed. Click **More info**, then
 **Run anyway**. To be sure the file is genuine, compare its checksum with the
@@ -305,6 +363,7 @@ commercial purposes, as long as:
 The [LICENSE](LICENSE) file is the legally binding text; this summary is only a
 guide.
 
-The app bundles other open-source components, each under its own license — see
-the `licenses` folder in the installed app, and
+The app bundles other open-source components, each under its own license —
+among them FFmpeg, which reads and plays the videos. See the `licenses` folder
+in the installed app, [packaging/licenses](packaging/licenses) and
 [lib/LibreHardwareMonitor/THIRD-PARTY-NOTICES.md](lib/LibreHardwareMonitor/THIRD-PARTY-NOTICES.md).
