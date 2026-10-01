@@ -52,8 +52,12 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
   `tray_win._with_service`. pywin32's `win32serviceutil.StartService` /
   `StopService` open the service manager with full access and fail for normal
   users.
-- The engine is shared: the service runs `clock_win.main(argv, stop, log)`.
-  Keep the command-line behaviour of the scripts unchanged when editing it.
+- The engine is shared: the scripts run `clock_win.main()`, and the service
+  plays the same `clock_win.Show` and `Player` itself (`service_win.Display`),
+  so that it can swap settings without a pause. Both start the loop and both
+  rebuild at `valid_until`, so a change to either step may need making in
+  `main()` and in `Display`. Keep the command-line behaviour of the scripts
+  unchanged when editing it.
 - **Settings go through `settings_win.py`.** A new setting needs all of: a
   default in `DEFAULT_LOOK`, a check in `clean_look` (the service runs as
   SYSTEM; nothing unchecked may reach it), a `clock_win` option, and a line in

@@ -196,7 +196,9 @@ GIF. `--zoom 2 --pan-x 0` zooms in and shows the left side.
 
 Everything the app's window can change works here too — 24-hour time
 (`--time-format 24h`), seconds, the date format (`--date-format "YYYY-MM-DD"`),
-sizes, colours, positions, renamed stats, fonts. See
+sizes, colours, positions, renamed stats, fonts, brightness
+(`--brightness 70`), a calendar (`--calendar month`), your own text, a
+countdown and a to-do list. See
 [Command-line options](HOW-IT-WORKS.md#command-line-options).
 
 ---

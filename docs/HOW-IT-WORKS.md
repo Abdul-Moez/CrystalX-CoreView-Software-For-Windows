@@ -281,7 +281,7 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 | `AGENTS.md`, `CLAUDE.md` | Rules for AI coding assistants working on the repo |
 | **The engine** | |
 | `lcd_win.py` | Plain player. Also defines `Panel`, `MAGIC`, `MAX_PIXELS`, `load_frames`, `fit_frame`, which `clock_win.py` imports. **The core driver — treat with care.** |
-| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. Its `main()` is also what the service runs, and its `preview()` draws the app's preview. |
+| `clock_win.py` | Overlay player: picture + clock + date + configurable stats. The service plays its `Show` and `Player`, the same ones `main()` uses, and its `preview()` draws the app's preview. |
 | `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
 | `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
 | `retro_pixel_guy_smoking_on_rooftop.gif` | The default picture |
@@ -655,7 +655,7 @@ The installed app is the same engine (`clock_win.py`, `lcd_win.py`,
   +---------------------------+   named pipe   +------------------------------+
   | window + tray icon        | -------------> | pipe server                  |
   | status, start/stop,       |  JSON, local   | Display thread:              |
-  | picture, options          |  users only    |   clock_win.main(stop=...)   |
+  | picture, options          |  users only    |   clock_win.Show + Player    |
   +-------------+-------------+                |   retries when the panel is  |
                 | start / stop                 |   busy or missing            |
                 v                              +--------------+---------------+
@@ -682,14 +682,16 @@ hardware, and stops itself 20 seconds after the last request.
 The settings (`settings_win.py`) are the **picture** — a file the service keeps
 — and the **look**: everything else that decides what the screen shows (fit,
 zoom and pan, clock and date formats, sizes, colours, positions, the seven stat
-spots and their names, font, frosted panel). Hiding the time, the date or the
-stats (`show_stats`) keeps their other settings for when they are shown again.
+spots and their names, font, frosted panel, brightness, the calendar, and the
+text, countdown and to-do blocks with what is written in them). Hiding the
+time, the date, the stats (`show_stats`) or one of those blocks keeps its
+other settings for when it is shown again.
 They live in `config.json`; a v1.0
 file, with only the picture and fit, loads with defaults for the rest.
 
 | Command | What the service does |
 |---|---|
-| `apply` | Stores the look, and optionally a new picture (sent as bytes) or `"default"`, then restarts the display. The window's one **Apply** button sends everything in this one message |
+| `apply` | Stores the look, and optionally a new picture (sent as bytes) or `"default"`, then builds the new look and swaps it in (see below). The window's one **Apply** button sends everything in this one message |
 | `save_layout`, `load_layout`, `delete_layout` | A **saved layout** is `layouts\<n>.json` (n = 1–10) with the look, plus `<n>.<ext>`, its own copy of its picture. Saving takes what is on the screen, so the window applies unsaved changes first |
 | `todo` | Ticks, unticks or removes one to-do item (found by its `id`), or removes every ticked one — straight from the window, without the rest of the form. New and edited items go with `apply` |
 | `set_autostart` | Switches the service between automatic and manual start |
@@ -719,7 +721,7 @@ is kept narrow:
 | The pipe accepts local clients only: SYSTEM, administrators and the signed-in user | No remote access |
 | The first pipe instance claims the name (`FILE_FLAG_FIRST_PIPE_INSTANCE`) | Nothing else can create the pipe first and pose as the service |
 | The window never sends a file path — it reads the picture and sends the bytes | Otherwise any program could get SYSTEM to open files on its behalf |
-| The service checks every picture (format, size ≤ 50 MB, ≤ 300 frames) and keeps its own copy | A long GIF held in memory at panel size could otherwise eat gigabytes |
+| The service checks every picture (format, size ≤ 50 MB, ≤ 300 frames) and keeps its own copy | Every frame is held in memory (packed), so an endless GIF could otherwise eat gigabytes |
 | `C:\ProgramData\CrystalX LCD` is writable only by SYSTEM and administrators | A user can't plant a picture or settings file for the service to read |
 | Every setting, from the pipe or from a file, goes through `settings_win.clean_look` | Only known keys, types and ranges reach the engine; anything else falls back to its default |
 | Fonts are only taken from `C:\Windows\Fonts`, by file name | The service never opens a path the user chose; fonts installed for one user only are therefore not offered |
@@ -737,23 +739,25 @@ Only the part of the picture that lands on the screen is resampled, so zooming
 into a large photo costs no more than showing it whole.
 
 **The window** is tkinter: status and Start/Stop at the top, the settings in
-five tabs (Picture, Clock, Stats, Style, Options), and one Apply / Undo for all
+six tabs (Picture, Clock, Stats, Extras, Style, Options), and one Apply / Undo for all
 of them. Its preview is drawn by `clock_win.preview()` — the engine itself, with
 the same options the service will get (`settings_win.engine_argv`) and example
 readings instead of the sensors — so it shows exactly what the panel will show.
 It redraws on every change in 15–50 ms, and never queues redraws: while one
 runs, only the newest waits.
 
-- **Dragging** on the preview moves the clock or stats block when grabbed by
-  its panel, and the picture anywhere else; the wheel zooms around the
+- **Dragging** on the preview moves a block up or down when grabbed inside
+  its box (the clock, the stats, or the text, countdown or to-do block; from
+  the layout's `boxes`), and the picture anywhere else; the wheel zooms around the
   pointer. The preview works from the picture's first frame, opened once and
   scaled down to 2048 px at most (placement is in proportions, so it looks the
   same).
 - **Size sliders** stop at the largest size that fits (`Layout.limits`);
   sizes and positions left automatic show what the engine chose.
-- **The free space** between the clock and stats blocks is shown in panel
-  pixels on the Picture tab (from the layout's `clock_box` and `stats_box`),
-  for anyone making a picture to fit it. Messages that come and go sit in
+- **The free space**: the tallest empty band between the blocks (with the
+  defaults, between the clock and the stats) is shown in panel pixels on the
+  Picture tab (from the layout's `boxes`), for anyone making a picture to fit
+  it. Messages that come and go sit in
   fixed-size boxes, so the window never changes size.
 - **Fonts**: the Style tab lists every font in `C:\Windows\Fonts`, each drawn
   in its own style. Reading their names takes about a second, so it happens
@@ -957,7 +961,7 @@ enormous margin — frame rate is not a constraint on this transport.
 
 ### How to measure
 
-Run the loop exactly as the service does, with the same options
+Run the same loop the service plays, with the same options
 (`clock_win.main(argv, stop, log)`), but with `clock_win.Panel` replaced by a stand-in whose
 `send` only counts frames: the real panel stays untouched and the numbers
 include the sensors. Wait for frames to flow, let it settle 10 s, then take
