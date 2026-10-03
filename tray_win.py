@@ -46,6 +46,7 @@ same program started with "--video-worker". The window never loads FFmpeg.
   CrystalXLCD.exe --hidden   start in the tray only (at login)
 """
 
+import calendar
 import copy
 import ctypes
 import datetime
@@ -110,13 +111,15 @@ WRAP = 300                      # width of wrapped text on the right, in px
 PREVIEW_HINT = "Drag to move - scroll to zoom"
 OVERLAP_HINT = "Some blocks overlap"
 
-TIME_CHOICES = [("12h", "12-hour  (3:25 PM)"),
+TIME_CHOICES = [("12h-zero", "12-hour  (03:25 PM)"),
+                ("12h", "12-hour  (3:25 PM)"),
                 ("12h-plain", "12-hour, no AM/PM  (3:25)"),
                 ("24h", "24-hour  (15:25)")]
-# Date patterns offered ready-made (codes: clock_win.DATE_CODES).
-DATE_PRESETS = ["(ddd) D-MMM-YYYY", "YYYY-MMM-DD (ddd)", "ddd D MMM YYYY",
-                "ddd, MMM D YYYY", "dddd, D MMMM", "D MMMM YYYY", "ddd D MMM",
-                "DD/MM/YYYY", "MM/DD/YYYY", "YYYY-MM-DD"]
+# Date patterns offered ready-made (codes: clock_win.DATE_CODES). The first
+# two differ only in the day's leading zero (see date_examples).
+DATE_PRESETS = ["(ddd) DD-MMM-YYYY", "(ddd) D-MMM-YYYY", "YYYY-MMM-DD (ddd)",
+                "ddd D MMM YYYY", "ddd, MMM D YYYY", "dddd, D MMMM", "D MMMM YYYY",
+                "ddd D MMM", "DD/MM/YYYY", "MM/DD/YYYY", "YYYY-MM-DD"]
 CUSTOM_DATE = "Custom pattern..."
 # The stats as the dropdowns name them: clearer than their short on-screen
 # labels ("RAM" and "RAM Usage" are GB and %).
@@ -485,6 +488,47 @@ class Slider(ttk.Frame):
         self.scale.state(["!disabled"] if on else ["disabled"])
 
 
+class TimeField(ttk.Frame):
+    """A time of day picked from lists: the hour, the minute and, on a
+    12-hour clock, AM or PM. Its value is HH:MM on the 24-hour clock."""
+
+    def __init__(self, parent, on_change):
+        super().__init__(parent)
+        self.on_change, self.twelve = on_change, None
+        self.hour = ttk.Combobox(self, state="readonly", width=3)
+        self.minute = ttk.Combobox(self, state="readonly", width=3,
+                                   values=[f"{m:02d}" for m in range(60)])
+        self.half = ttk.Combobox(self, state="readonly", width=4, values=("AM", "PM"))
+        self.boxes = [self.hour, self.minute, self.half]
+        self.hour.pack(side="left")
+        ttk.Label(self, text=":").pack(side="left", padx=3)
+        self.minute.pack(side="left")
+        for box in self.boxes:
+            box.bind("<<ComboboxSelected>>", lambda e: self.on_change(self.get()))
+
+    def set(self, value, twelve):
+        """Show HH:MM (nothing is midnight) on a 12-hour or a 24-hour clock,
+        without calling on_change."""
+        when = datetime.datetime.strptime(value or "00:00", "%H:%M")
+        if twelve != self.twelve:
+            self.twelve = twelve
+            self.hour.configure(values=[f"{h:02d}" for h in
+                                        (range(1, 13) if twelve else range(24))])
+            if twelve:
+                self.half.pack(side="left", padx=(6, 0))
+            else:
+                self.half.pack_forget()
+        self.hour.set(when.strftime("%I" if twelve else "%H"))
+        self.minute.set(when.strftime("%M"))
+        self.half.current(when.hour // 12)
+
+    def get(self):
+        hour = int(self.hour.get())
+        if self.twelve:
+            hour = hour % 12 + 12 * self.half.current()
+        return f"{hour:02d}:{self.minute.get()}"
+
+
 def _px(value):
     return f"{round(value)} px"
 
@@ -658,6 +702,118 @@ class FontPicker:
     def _done(self):
         self.result = self.selected
         self.top.destroy()
+
+
+class DatePicker:
+    """A month of days to click, for choosing a date. `result` is the date
+    chosen, or None if the window was closed without choosing one."""
+
+    YEARS = (1900, 2199)
+    PICKED, HOVER = "#cce4ff", "#e5f1fb"
+
+    def __init__(self, parent, current, week_start, under):
+        self.result, self.current = None, current
+        self.today = datetime.date.today()
+        self.weeks = calendar.Calendar(0 if week_start == "mon" else 6)
+        self.view = None                    # (year, month) on show
+        self.top = tk.Toplevel(parent)
+        self.top.withdraw()                 # until it is in its place
+        self.top.title("Choose a date")
+        self.top.transient(parent)
+        self.top.resizable(False, False)
+        frame = ttk.Frame(self.top, padding=12)
+        frame.pack()
+        head = ttk.Frame(frame)
+        head.pack()
+        ttk.Button(head, text="\u2039", width=3, command=lambda: self._step(-1)).pack(side="left")
+        self.month = ttk.Combobox(head, state="readonly", width=11,
+                                  values=list(calendar.month_name)[1:])
+        self.month.pack(side="left", padx=(6, 4))
+        self.month.bind("<<ComboboxSelected>>", lambda e: self._fill())
+        self.year = tk.StringVar()
+        ttk.Spinbox(head, width=5, from_=self.YEARS[0], to=self.YEARS[1],
+                    textvariable=self.year).pack(side="left", padx=(0, 6))
+        self.year.trace_add("write", lambda *_: self._fill())
+        ttk.Button(head, text="\u203a", width=3, command=lambda: self._step(1)).pack(side="left")
+        self.plain = tkfont.nametofont("TkDefaultFont")
+        self.bold = self.plain.copy()
+        self.bold.configure(weight="bold")
+        days = tk.Frame(frame, bg="white", highlightthickness=1, highlightbackground="#bbb")
+        days.pack(pady=(10, 0))
+        for column, weekday in enumerate(self.weeks.iterweekdays()):
+            tk.Label(days, text=calendar.day_abbr[weekday][:2], bg="white", fg=GREY,
+                     width=4).grid(row=0, column=column, pady=(4, 0))
+        self.cells = []
+        for i in range(42):                 # six weeks: the most a month spans
+            cell = tk.Label(days, width=4, pady=4, bg="white")
+            cell.grid(row=1 + i // 7, column=i % 7)
+            cell.bind("<Button-1>", lambda e, i=i: self._pick(i))
+            cell.bind("<Enter>", lambda e, i=i: self._paint(i, hover=True))
+            cell.bind("<Leave>", lambda e, i=i: self._paint(i))
+            self.cells.append(cell)
+        for widget in (days, *days.winfo_children()):
+            widget.bind("<MouseWheel>", lambda e: self._step(-1 if e.delta > 0 else 1))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="Today", command=lambda: self._show(self.today)).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=self.top.destroy).pack(side="right")
+        self.top.bind("<Escape>", lambda e: self.top.destroy())
+        self._show(current or self.today)
+        # Under the button that opened it, or over it where the screen ends.
+        self.top.update_idletasks()
+        x, y = under.winfo_rootx(), under.winfo_rooty() + under.winfo_height() + 2
+        width = self.top.winfo_reqwidth()
+        height = self.top.winfo_reqheight() + 40            # with its title bar
+        work = win32api.GetMonitorInfo(win32api.MonitorFromPoint(
+            (x, y), win32con.MONITOR_DEFAULTTONEAREST))["Work"]
+        if y + height > work[3]:
+            y = under.winfo_rooty() - height - 2
+        self.top.geometry(f"+{min(x, work[2] - width - 16)}+{y}")
+        self.top.deiconify()
+        self.top.wait_visibility()
+        self.top.grab_set()                 # modal: the main window waits
+
+    def _show(self, date):
+        """Turn to the month `date` is in."""
+        self.month.current(date.month - 1)
+        # Writing the year fills the days in.
+        self.year.set(str(min(max(date.year, self.YEARS[0]), self.YEARS[1])))
+
+    def _step(self, months):
+        count = self.view[0] * 12 + self.view[1] - 1 + months
+        if self.YEARS[0] * 12 <= count < (self.YEARS[1] + 1) * 12:
+            self._show(datetime.date(count // 12, count % 12 + 1, 1))
+
+    def _fill(self):
+        """Write the days of the month and year picked above into the cells.
+        A year half typed is not one yet: the days stay as they are."""
+        try:
+            year = int(self.year.get())
+        except ValueError:
+            return
+        if not self.YEARS[0] <= year <= self.YEARS[1]:
+            return
+        self.view = year, self.month.current() + 1
+        days = [day for week in self.weeks.monthdayscalendar(*self.view) for day in week]
+        self.days = [datetime.date(*self.view, day) if day else None
+                     for day in days + [0] * (42 - len(days))]
+        for i in range(42):
+            self._paint(i)
+
+    def _paint(self, i, hover=False):
+        day = self.days[i]
+        today = day == self.today
+        self.cells[i].configure(
+            text=day.day if day else "",
+            bg=self.PICKED if day and day == self.current
+            else self.HOVER if day and hover else "white",
+            fg=BLUE if today else "black", font=self.bold if today else self.plain,
+            cursor="hand2" if day else "")
+
+    def _pick(self, i):
+        if self.days[i]:
+            self.result = self.days[i]
+            self.top.destroy()
 
 
 # -- the main window ------------------------------------------------------------
@@ -933,7 +1089,7 @@ class MainWindow:
             tab, text="Time", variable=self.show_time,
             command=lambda: self._set("show_time", self.show_time.get())))
         frame.pack(fill="x")
-        self.time_format = ttk.Combobox(frame, state="readonly", width=26,
+        self.time_format = ttk.Combobox(frame, state="readonly", width=28,
                                         values=[text for _, text in TIME_CHOICES])
         self.time_format.bind("<<ComboboxSelected>>", lambda e: self._set(
             "time_format", TIME_CHOICES[self.time_format.current()][0]))
@@ -950,7 +1106,8 @@ class MainWindow:
             tab, text="Date", variable=self.show_date,
             command=lambda: self._set("show_date", self.show_date.get())))
         frame.pack(fill="x", pady=(10, 0))
-        self.date_format = ttk.Combobox(frame, state="readonly", width=26)
+        # (Wide enough for date_examples' longest line.)
+        self.date_format = ttk.Combobox(frame, state="readonly", width=28)
         self.date_format.bind("<<ComboboxSelected>>", lambda e: self._date_choice())
         self.date_pattern = tk.StringVar()
         self.date_entry = ttk.Entry(frame, textvariable=self.date_pattern, width=26,
@@ -1159,25 +1316,21 @@ class MainWindow:
                                            values=[text for _, text in COUNTDOWN_CHOICES])
         self.countdown_mode.bind("<<ComboboxSelected>>", lambda e: self._set(
             "countdown_mode", COUNTDOWN_CHOICES[self.countdown_mode.current()][0]))
-        self.countdown_date = tk.StringVar()
-        self.countdown_time = tk.StringVar()
+        # The date is picked from a calendar and the time from lists, so
+        # neither can be written wrongly.
+        self.countdown_date_btn = ttk.Button(grid, width=18, command=self.choose_countdown_date)
+        self.countdown_time = TimeField(grid, self._countdown_time_picked)
         self.countdown_label = tk.StringVar()
-        dates = ttk.Frame(grid)
-        self.countdown_date_entry = ttk.Entry(dates, textvariable=self.countdown_date, width=12)
-        self.countdown_date_entry.pack(side="left")
-        ttk.Label(dates, text="time").pack(side="left", padx=(10, 4))
-        self.countdown_time_entry = ttk.Entry(dates, textvariable=self.countdown_time, width=6)
-        self.countdown_time_entry.pack(side="left")
         limit = self.root.register(lambda p: len(p) <= MAX_COUNTDOWN_LABEL)
         self.countdown_label_entry = ttk.Entry(grid, textvariable=self.countdown_label, width=26,
                                                validate="key", validatecommand=(limit, "%P"))
-        for var in (self.countdown_date, self.countdown_time, self.countdown_label):
-            var.trace_add("write", lambda *_: self._countdown_typed())
-        self._grid(grid, [("Counts", self.countdown_mode), ("Date", dates),
-                          ("Name", self.countdown_label_entry)])
+        self.countdown_label.trace_add("write", lambda *_: self._set_typed(
+            "countdown_label", self.countdown_label.get().strip(), self.countdown_label_entry))
+        self._grid(grid, [("Counts", self.countdown_mode), ("Date", self.countdown_date_btn),
+                          ("Time", self.countdown_time), ("Name", self.countdown_label_entry)])
         self.countdown_example = self._fixed_label(frame, 2, WRAP, style="Hint.TLabel",
                                                    wraplength=WRAP, justify="left")
-        self.block_widgets["countdown"] = [self.countdown_mode, self.countdown_date_entry,
+        self.block_widgets["countdown"] = [self.countdown_mode, self.countdown_date_btn,
                                            self.countdown_label_entry]
         self._block_controls(frame, "countdown")
 
@@ -1320,35 +1473,27 @@ class MainWindow:
         if not self._loading and text != self.look["note_text"]:
             self._set("note_text", text)
 
-    def _countdown_typed(self):
-        if self._loading:
-            return
-        date = self.countdown_date.get().strip()
-        when = self.countdown_time.get().strip()
-        label = self.countdown_label.get().strip()
-        changes = {"countdown_label": label}
-        if _valid(date, "%Y-%m-%d"):
-            changes["countdown_date"] = date
-        if not when or _valid(when, "%H:%M"):
-            changes["countdown_time"] = when
-        if any(self.look[key] != value for key, value in changes.items()):
-            self.look.update(changes)
-            self.changed()
-        else:
-            self._show_countdown_example()
+    def choose_countdown_date(self):
+        date = self.look["countdown_date"]
+        picker = DatePicker(self.root, _as_date(date) if date else None,
+                            self.look["week_start"], self.countdown_date_btn)
+        self.root.wait_window(picker.top)
+        if picker.result:
+            self._set("countdown_date", picker.result.isoformat())
+
+    def _countdown_time_picked(self, when):
+        # Midnight is the start of the day, which is what no time means.
+        self._set("countdown_time", "" if when == "00:00" else when)
 
     def _show_countdown_example(self):
-        date = self.countdown_date.get().strip()
-        when = self.countdown_time.get().strip()
-        if not _valid(date, "%Y-%m-%d"):
-            text = "Write the date as year-month-day, for example 2026-12-25."
-        elif when and not _valid(when, "%H:%M"):
-            text = "Write the time as hours:minutes, for example 18:30."
+        look = self.look
+        date, when = look["countdown_date"], look["countdown_time"]
+        if not date:
+            text = "Choose the date to count to, or to count from."
         else:
-            look = self.look
-            target = datetime.datetime.strptime(
-                date + (" " + when if when and look["countdown_mode"] == "to-hours" else ""),
-                "%Y-%m-%d %H:%M" if when and look["countdown_mode"] == "to-hours" else "%Y-%m-%d")
+            timed = when and look["countdown_mode"] == "to-hours"
+            target = datetime.datetime.strptime(date + (" " + when if timed else ""),
+                                                "%Y-%m-%d %H:%M" if timed else "%Y-%m-%d")
             shows, _ = countdown_text(look["countdown_mode"], target, look["countdown_label"],
                                       datetime.datetime.now())
             text = (f"Shows now: {shows}" if shows else
@@ -1538,8 +1683,7 @@ class MainWindow:
             self.seconds.set(look["seconds"])
             self.time_format.current([k for k, _ in TIME_CHOICES].index(look["time_format"]))
             today = datetime.date.today()
-            examples = [today.strftime(date_strftime(p)) for p in DATE_PRESETS]
-            self.date_format.configure(values=examples + [CUSTOM_DATE])
+            self.date_format.configure(values=date_examples(today) + [CUSTOM_DATE])
             if look["date_format"] in DATE_PRESETS and not self._custom_date:
                 self.date_format.current(DATE_PRESETS.index(look["date_format"]))
             else:
@@ -1628,9 +1772,12 @@ class MainWindow:
             self.note_box.edit_modified(False)
             self.note_box.configure(state=state)
         self.countdown_mode.current([k for k, _ in COUNTDOWN_CHOICES].index(look["countdown_mode"]))
-        for var, entry, key in ((self.countdown_date, self.countdown_date_entry, "countdown_date"),
-                                (self.countdown_time, self.countdown_time_entry, "countdown_time"),
-                                (self.countdown_label, self.countdown_label_entry, "countdown_label"),
+        date = look["countdown_date"]
+        self.countdown_date_btn.configure(text=_date_text(_as_date(date)) if date
+                                          else "Choose a date...")
+        # Asked the way the clock shows the time: with AM and PM, or to 24.
+        self.countdown_time.set(look["countdown_time"], look["time_format"] != "24h")
+        for var, entry, key in ((self.countdown_label, self.countdown_label_entry, "countdown_label"),
                                 (self.todo_title, self.todo_title_entry, "todo_title")):
             if focus is not entry and var.get().strip() != look[key]:
                 var.set(look[key])
@@ -1707,7 +1854,7 @@ class MainWindow:
         _enable([self.frost_dark, self.frost_blur], look["frost"])
         for block in EXTRA_BLOCKS:
             _enable(self.block_widgets[block], look[f"show_{block}"])
-        _enable([self.countdown_time_entry],
+        _enable(self.countdown_time.boxes,
                 look["show_countdown"] and look["countdown_mode"] == "to-hours")
         _enable(self.calendar_widgets, bool(look["calendar"]))
         chosen_item = bool(self.todo_tree.selection())
@@ -2753,12 +2900,24 @@ def _clamp(value):
     return min(1.0, max(0.0, value))
 
 
-def _valid(text, fmt):
-    try:
-        datetime.datetime.strptime(text, fmt)
-        return True
-    except ValueError:
-        return False
+def date_examples(today):
+    """`today` written in each ready-made pattern, for the dropdown. From
+    the 10th on, the day reads the same with and without its leading zero, so
+    the pattern without one says which it is."""
+    examples = [today.strftime(date_strftime(pattern)) for pattern in DATE_PRESETS]
+    if examples[1] == examples[0]:
+        examples[1] += "  (5, not 05)"
+    return examples
+
+
+def _as_date(text):
+    return datetime.datetime.strptime(text, "%Y-%m-%d").date()
+
+
+def _date_text(date):
+    """A date as the countdown's button shows it: Fri 25 Dec 2026."""
+    return (f"{calendar.day_abbr[date.weekday()]} {date.day:02d} "
+            f"{calendar.month_abbr[date.month]} {date.year}")
 
 
 def _clock(seconds):

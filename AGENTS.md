@@ -77,7 +77,12 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
 - **Old settings must keep loading.** A `config.json` or layout from v1.0 to
   v1.2 (one picture, its placement in the look) loads as a one-item playlist
   and must give the engine the very options it got before; `migrate_media`
-  moves the files when the service starts.
+  moves the files when the service starts. The same goes for the clock's
+  formats: the app's defaults (`DEFAULT_TIME_FORMAT`, `DEFAULT_DATE_FORMAT` in
+  `settings_win.py`; with leading zeros since v1.4) are for new installs and
+  Reset to defaults only. A saved file keeps the formats it names, a v1.0
+  file that names none keeps the old ones (`LEGACY_FORMATS`), and the scripts'
+  own defaults in `clock_win.py` stay as they were.
 - **Video.** A video is converted once, by the window, into a clip
   (`video_win`); the service plays clips with FFmpeg's H.264 decoder only.
   Read "Video" in `docs/HOW-IT-WORKS.md` before touching it. In particular:

@@ -122,13 +122,21 @@ def item_path(item):
 
 DEFAULT_ROTATION = {"enabled": False, "minutes": 5}
 
+# The clock as the app first shows it, with leading zeros: 03:25 PM and
+# (Sat) 03-Oct-2026. Up to v1.3 it had none (3:25 PM, 3-Oct), which is still
+# what the scripts show by default -- and what LEGACY_FORMATS keeps for a
+# settings file that names no format.
+DEFAULT_TIME_FORMAT = "12h-zero"
+DEFAULT_DATE_FORMAT = "(ddd) DD-MMM-YYYY"
+LEGACY_FORMATS = {"time_format": "12h", "date_format": DATE_FORMAT}
+
 DEFAULT_LOOK = {
     # What is behind the clock: pictures, GIFs and videos, one after another.
     "playlist": [new_item()], "playlist_shuffle": False,
     # The clock block. Sizes and positions of None are automatic.
-    "show_time": True, "time_format": "12h", "seconds": False,
+    "show_time": True, "time_format": DEFAULT_TIME_FORMAT, "seconds": False,
     "time_size": None, "time_color": "#ffffff",
-    "show_date": True, "date_format": DATE_FORMAT,
+    "show_date": True, "date_format": DEFAULT_DATE_FORMAT,
     "date_size": None, "date_color": "#ffffff",
     "clock_pos": None,
     # The stats block: MAX_SPOTS spots, None for an empty one. Hiding it
@@ -430,8 +438,13 @@ def _with_legacy_picture(raw):
 
 
 def config_from(raw):
-    """A complete, valid config from a settings dict: the look, and rotation."""
+    """A complete, valid config from a settings dict: the look, and rotation.
+
+    A v1.0 settings file holds only the picture. Its clock had the formats of
+    that time, so it keeps them; no file at all gives today's defaults."""
     raw = raw if isinstance(raw, dict) else {}
+    if raw:
+        raw = {**LEGACY_FORMATS, **raw}
     return {**clean_look(_with_legacy_picture(raw)),
             "rotation": clean_rotation(raw.get("rotation"))}
 

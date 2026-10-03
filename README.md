@@ -117,10 +117,12 @@ Below it are six tabs:
     px, from 137 to 1068 px down* — in case you want a picture whose subject
     fits exactly in that gap.
 - **Clock** — the **time** and the **date**, each of which you can switch off.
-  - Time: 12-hour with or without AM/PM, or 24-hour, with or without seconds.
+  - Time: 12-hour (written `08:41 PM` or `8:41 PM`, or without AM/PM), or
+    24-hour, with or without seconds.
   - Date: pick a ready-made format, or choose **Custom pattern…** and write
     your own with codes such as `ddd D-MMM-YYYY` (the codes are listed under
-    the box).
+    the box). The first two formats are the same date with and without a zero
+    before a single-digit day: `03-Oct` or `3-Oct`.
   - A size slider and a colour for each. The size stops at the largest that
     still fits the screen's width. Without AM/PM, the clock can be about twice
     as big.
@@ -149,7 +151,8 @@ Below it are six tabs:
     wrap.
   - **Countdown** — days to a date (*12 days to Launch*, then *Launch is
     today!*), days and hours to a date and time, or days since a date (*214
-    days since I quit*).
+    days since I quit*). Click the date to pick it from a calendar; the time
+    is picked from lists.
   - **To-do list** — with an optional title. Ticked items are crossed out and
     dimmed. **Ticking and removing items show on the screen straight away**;
     new or edited items show when you click Apply. Double-click an item to

@@ -63,6 +63,7 @@ from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, MAX_ZOOM, Panel, fit_frame,
 # supported here and raises ValueError.
 TIME_FORMATS = {
     "12h":       ("%#I:%M %p", "%#I:%M:%S %p"),     # 3:25 PM
+    "12h-zero":  ("%I:%M %p", "%I:%M:%S %p"),       # 03:25 PM
     "12h-plain": ("%#I:%M", "%#I:%M:%S"),           # 3:25
     "24h":       ("%H:%M", "%H:%M:%S"),             # 15:25
 }
@@ -1321,7 +1322,8 @@ def build_parser():
     ap.add_argument("--font", default="consolab.ttf",
                     help="font file in the Windows font directory (default consolab.ttf)")
     ap.add_argument("--time-format", choices=TIME_FORMATS, default="12h",
-                    help="12h (3:25 PM), 12h-plain (3:25) or 24h (15:25); default 12h")
+                    help="12h (3:25 PM), 12h-zero (03:25 PM), 12h-plain (3:25) or "
+                         "24h (15:25); default 12h")
     ap.add_argument("--seconds", action="store_true", help="show seconds on the clock")
     ap.add_argument("--date-format", default=DATE_FORMAT, metavar="PATTERN",
                     help=f"the date, written with the codes {' '.join(DATE_CODES)}; "

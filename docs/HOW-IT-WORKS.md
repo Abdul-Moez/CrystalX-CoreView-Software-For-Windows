@@ -192,8 +192,9 @@ script by hand.
 
 ### 8. Use `%#I`, not `%-I`, to drop leading zeros
 
-`TIME_FORMATS` and the date codes (`DATE_CODES`) use `%#I` / `%#d` so the
-clock reads `3:25`, not `03:25`. The `%-I` / `%-d` form found in many Python examples is not supported
+`TIME_FORMATS` and the date codes (`DATE_CODES`) use `%#I` / `%#d` where the
+clock should read `3:25`, not `03:25` (the `12h-zero` format and the `DD` code
+keep the zero, with plain `%I` / `%d`). The `%-I` / `%-d` form found in many Python examples is not supported
 on Windows and raises `ValueError: Invalid format string`.
 
 ---
@@ -347,7 +348,7 @@ because its placement was decided when it was converted.
 |---|---|
 | `--fit fill\|blur\|color`, `--fit-color` | Place the picture on a panel-shaped canvas (see [Fitting any picture](#the-app-service-window-and-installer)) |
 | `--zoom 1–4`, `--pan-x 0–1`, `--pan-y 0–1` | With `--fit`: enlarge the picture, and choose which part shows — 0 lines up its left (top) edge with the screen's, 1 its right (bottom) edge, 0.5 centres it |
-| `--time-format 12h\|12h-plain\|24h`, `--seconds` | `3:25 PM`, `3:25` or `15:25`, optionally with seconds |
+| `--time-format 12h\|12h-zero\|12h-plain\|24h`, `--seconds` | `3:25 PM`, `03:25 PM`, `3:25` or `15:25`, optionally with seconds (default `12h`) |
 | `--date-format PATTERN` | The date, from the codes below (default `(ddd) D-MMM-YYYY`) |
 | `--no-time`, `--no-date`, `--no-stats` | Leave that part out |
 | `--time-size`, `--date-size`, `--label-size`, `--value-size` | Text sizes in px; each shrinks to fit the width if too big |
@@ -864,6 +865,12 @@ as a playlist of that one picture, placed the same way (`config_from`,
 `read_layout`); when the service starts it moves those files into the pool
 and rewrites the settings (`migrate_media`). Nothing changes on the screen.
 
+The app's clock comes with leading zeros: `08:41 PM` (`12h-zero`) and
+`(Sat) 03-Oct-2026` (`(ddd) DD-MMM-YYYY`). Up to v1.3 it had none, and the
+scripts' own defaults are still `12h` and `(ddd) D-MMM-YYYY`. Saved settings
+and layouts name their formats and keep them; a v1.0 settings file, which
+names none, keeps the old ones too (`LEGACY_FORMATS`).
+
 | Command | What the service does |
 |---|---|
 | `upload_begin`, `upload_chunk`, `upload_end`, `upload_abort` | Take one file from the window, in pieces of 1 MB: a picture or GIF, or a clip the window has converted. It is staged under a random name, checked when complete, and moved into the media pool; the reply to `upload_end` is the name to use in the playlist |
@@ -978,6 +985,10 @@ runs, only the newest waits.
   does.
 - **Size sliders** stop at the largest size that fits (`Layout.limits`);
   sizes and positions left automatic show what the engine chose.
+- **The countdown's date and time** are picked, not typed: the date from a
+  small calendar window (`DatePicker`, which starts its weeks on the day the
+  calendar setting says), the time from lists (`TimeField`) that follow the
+  clock's format, with AM and PM or to 24. Midnight is stored as no time.
 - **The free space**: the tallest empty band between the blocks (with the
   defaults, between the clock and the stats) is shown in panel pixels on the
   Picture tab (from the layout's `boxes`), for anyone making a picture to fit

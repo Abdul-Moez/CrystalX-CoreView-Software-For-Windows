@@ -215,7 +215,9 @@ first converted for the screen:
    any `--fit` option, and start it.
 
 Everything the app's window can change works here too — 24-hour time
-(`--time-format 24h`), seconds, the date format (`--date-format "YYYY-MM-DD"`),
+(`--time-format 24h`), a zero before single-digit hours
+(`--time-format 12h-zero`, for `08:41 PM`), seconds, the date format
+(`--date-format "YYYY-MM-DD"`),
 sizes, colours, positions, renamed stats, fonts, brightness
 (`--brightness 70`), a calendar (`--calendar month`), your own text, a
 countdown, a to-do list, and warning colours (`--warn cputemp=75:90` turns the
