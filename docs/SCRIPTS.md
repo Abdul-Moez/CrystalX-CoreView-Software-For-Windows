@@ -220,8 +220,11 @@ Everything the app's window can change works here too — 24-hour time
 (`--date-format "YYYY-MM-DD"`),
 sizes, colours, positions, renamed stats, fonts, brightness
 (`--brightness 70`), a calendar (`--calendar month`), your own text, a
-countdown, a to-do list, and warning colours (`--warn cputemp=75:90` turns the
-CPU temperature orange at 75°C and red at 90°C). See
+countdown, a to-do list, the weather (`--weather 51.51,-0.13`, your place's
+latitude and longitude; it is read from [Open-Meteo](https://open-meteo.com/)
+every 15 minutes, and that position is sent to it), and warning colours
+(`--warn cputemp=75:90` turns the CPU temperature orange at 75°C and red at
+90°C). See
 [Command-line options](HOW-IT-WORKS.md#command-line-options). Two things are
 the app's alone: the playlist and the rotation of saved layouts. A script
 shows one picture, GIF or video.

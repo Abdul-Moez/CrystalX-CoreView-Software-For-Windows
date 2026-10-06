@@ -26,7 +26,7 @@ Runs as the signed-in user, without admin rights, and controls the service
 (service_win.py). Everything lives in the main window: status and start/stop,
 then tabs for the picture (a playlist of pictures, GIFs and videos, each
 filled or fitted, dragged and zoomed), the clock and date, the stats, the
-extras (text, countdown, to-do list, calendar), the style (brightness, font,
+extras (weather, text, countdown, to-do list, calendar), the style (brightness, font,
 frosted panel) and options (start with Windows, saved layouts and rotating
 them). The preview beside them is drawn by the engine itself. The tray icon
 only has Show and Quit; clicking it opens the window, and closing the window
@@ -76,6 +76,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import clock_win
 import ipc_win
 import video_win
+import weather_win
 from clock_win import MAX_SPOTS, SLOTS, countdown_text, date_strftime
 from ipc_win import (DISPLAY_NAME, LOG_FILE, MAX_FRAMES, MAX_PICTURE_BYTES,
                      SERVICE_NAME, VERSION, app_dir)
@@ -139,14 +140,17 @@ STAT_KEYS = [key for key, _ in STAT_CHOICES]
 COUNTDOWN_CHOICES = [("to", "Days to a date"), ("to-hours", "Days and hours to a date"),
                      ("since", "Days since a date")]
 # What the free-space readout calls each block.
-BLOCK_NAMES = {"clock": "clock", "stats": "stats", "note": "text",
+BLOCK_NAMES = {"clock": "clock", "stats": "stats", "weather": "weather", "note": "text",
                "countdown": "countdown", "todo": "to-do list"}
 BOX, TICKED = "\u2610", "\u2611"            # the to-do list's boxes in the window
 # What the user wrote or chose, which Reset to defaults keeps: the text,
-# countdown and to-do list, and the playlist of pictures.
+# countdown and to-do list, the weather's city and unit, and the playlist of
+# pictures.
 CONTENT_KEYS = ("note_text", "countdown_mode", "countdown_date", "countdown_time",
                 "countdown_label", "todo_title", "todo_items",
+                "weather_place", "weather_unit",
                 "playlist", "playlist_shuffle")
+MAX_CITY = 60                               # characters in a city being looked for
 
 ID_SHOW, ID_QUIT = 1001, 1002
 WM_TRAY = win32con.WM_USER + 20
@@ -866,6 +870,9 @@ class MainWindow:
         self._saved_look = clean_look({})   # what the screen shows (for Undo)
         self._todo_shown = None             # the to-do items in the list box
         self._editing = None                # the id of the to-do item being edited
+        self._places = []                   # what the last search for a city found
+        self._searching = False             # such a search is under way
+        self._place_note = None             # what it has to say (else the usual hint)
         self._status_key = None             # what refresh last showed
         self.visible = False
         self.fonts = FontCatalog()
@@ -1281,7 +1288,8 @@ class MainWindow:
                   style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_extras_tab(self):
-        """Text, Countdown, To-do and Calendar, each in a tab of its own."""
+        """Weather, Text, Countdown, To-do and Calendar, each in a tab of its
+        own."""
         tab = self._tab("Extras")
         inner = ttk.Notebook(tab)
         inner.pack(fill="both", expand=True)
@@ -1293,6 +1301,56 @@ class MainWindow:
             frame = ttk.Frame(inner, padding=8)
             inner.add(frame, text=f" {title} ")
             return frame
+
+        # Weather. The city is looked up by name, then picked from the places
+        # found: only where it is goes into the settings (and to the service).
+        frame = page("Weather")
+        self._block_switch(frame, "weather", "Show the weather")
+        grid = ttk.Frame(frame)
+        grid.pack(fill="x", pady=(4, 0))
+        find = ttk.Frame(grid)
+        self.city = tk.StringVar()
+        limit = self.root.register(lambda p: len(p) <= MAX_CITY)
+        self.city_entry = ttk.Entry(find, textvariable=self.city, width=22,
+                                    validate="key", validatecommand=(limit, "%P"))
+        self.city_entry.pack(side="left")
+        self.city_entry.bind("<Return>", lambda e: self.find_city())
+        self.city_btn = ttk.Button(find, text="Search", width=8, command=self.find_city)
+        self.city_btn.pack(side="left", padx=(6, 0))
+        self.place_box = ttk.Combobox(grid, state="readonly", width=34)
+        self.place_box.bind("<<ComboboxSelected>>", self._place_picked)
+        self.weather_unit = tk.StringVar(value="c")
+        self.weather_forecast = tk.BooleanVar(value=True)
+        self.weather_plain = tk.BooleanVar(value=False)
+        units, shows = ttk.Frame(grid), ttk.Frame(grid)
+        radios = []
+        for parent, var, key, choices in (
+                (units, self.weather_unit, "weather_unit",
+                 (("c", "Celsius"), ("f", "Fahrenheit"))),
+                (shows, self.weather_forecast, "weather_forecast",
+                 ((True, "Today and 3 days"), (False, "Today only")))):
+            for value, text in choices:
+                radio = ttk.Radiobutton(parent, text=text, value=value, variable=var,
+                                        command=lambda var=var, key=key: self._set(key, var.get()))
+                radio.pack(side="left", padx=(0, 10))
+                radios.append(radio)
+        plain = ttk.Checkbutton(grid, text="Icons in the block's colour",
+                                variable=self.weather_plain,
+                                command=lambda: self._set("weather_plain_icons",
+                                                          self.weather_plain.get()))
+        self._grid(grid, [("Find", find), ("City", self.place_box), ("Units", units),
+                          ("Show", shows), ("", plain)])
+        self.place_hint = self._fixed_label(frame, 2, WRAP, style="Hint.TLabel",
+                                            wraplength=WRAP, justify="left")
+        self.block_widgets["weather"] = [self.city_entry, self.city_btn, self.place_box,
+                                         *radios, plain]
+        self._block_controls(frame, "weather")
+        credit = ttk.Label(frame, text=weather_win.CREDIT, foreground=BLUE, cursor="hand2")
+        credit.pack(anchor="w", pady=(8, 0))
+        credit.bind("<Button-1>", lambda e: webbrowser.open(weather_win.CREDIT_LINK))
+        ttk.Label(frame, text="Read every 15 minutes while it is shown. Where your city "
+                              "is (to about a kilometre) is sent to Open-Meteo for it.",
+                  style="Hint.TLabel", wraplength=WRAP, justify="left").pack(anchor="w")
 
         # Text
         frame = page("Text")
@@ -1456,6 +1514,44 @@ class MainWindow:
         self.block_widgets[block] += [size, swatch, *radios, panel, pos]
 
     # -- the extras' own inputs ------------------------------------------------------
+
+    def find_city(self):
+        """Look up the city typed in (Open-Meteo's place search, asked from
+        here and only when Search is pressed) and offer what it finds in the
+        City list."""
+        name = self.city.get().strip()
+        if len(name) < 2 or self._searching:
+            return
+        self._searching = True
+        self._say_place("Searching...")
+        found = []
+
+        def done(error):
+            self._searching = False
+            if error:
+                self._say_place(f"Could not search: {error}")
+            elif not found:
+                self._say_place("No place found by that name. Check the spelling, or "
+                                "try the nearest larger town.")
+            else:
+                self._places = found
+                self.place_box.configure(values=[place["name"] for place in found])
+                self._say_place("Now pick your city from the City list.")
+                if self.visible:
+                    self.place_box.focus_set()
+                    self.place_box.event_generate("<Down>")     # opens the list
+
+        self.app.background(lambda: found.extend(weather_win.search(name)), done)
+
+    def _say_place(self, text):
+        self._place_note = text
+        self.place_hint.configure(text=text)
+
+    def _place_picked(self, _event=None):
+        index = self.place_box.current()
+        if 0 <= index < len(self._places):
+            self._place_note = None
+            self._set("weather_place", dict(self._places[index]))
 
     def _set_typed(self, key, value, entry):
         """A text box changed a setting. Pushing the look back must not
@@ -1764,6 +1860,21 @@ class MainWindow:
             self.block_swatch[block].set(look[f"{block}_color"])
             self.block_align[block].set(look[f"{block}_align"])
             self.block_frost[block].set(look[f"{block}_frost"])
+        # The City list holds what the last search found, and the place in use.
+        place = look["weather_place"]
+        names = [found["name"] for found in self._places]
+        if place and place["name"] not in names:
+            names.append(place["name"])
+        if list(self.place_box.cget("values")) != names:
+            self.place_box.configure(values=names)
+        if self.place_box.get() != (place["name"] if place else ""):
+            self.place_box.set(place["name"] if place else "")
+        self.weather_unit.set(look["weather_unit"])
+        self.weather_forecast.set(look["weather_forecast"])
+        self.weather_plain.set(look["weather_plain_icons"])
+        self.place_hint.configure(text=self._place_note or (
+            "To change it, type another city and press Search." if place else
+            "Type your city, press Search, then pick it from the City list."))
         if focus is not self.note_box and self.note_box.get("1.0", "end-1c") != look["note_text"]:
             state = self.note_box.cget("state")
             self.note_box.configure(state="normal")

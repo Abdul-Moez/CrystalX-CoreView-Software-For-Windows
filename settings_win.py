@@ -66,6 +66,7 @@ MAX_NOTE_LINES = 16
 MAX_COUNTDOWN_LABEL = 40
 MAX_TODO_ITEMS = 20
 MAX_TODO_TEXT = 100
+MAX_PLACE_NAME = 80             # characters in the weather place's name
 LAYOUTS_DIR = os.path.join(DATA_DIR, "layouts")
 
 # The playlist. An item's file is "default" (the bundled GIF) or a file in the
@@ -164,9 +165,14 @@ DEFAULT_LOOK = {
     "show_countdown": False, "countdown_mode": "to", "countdown_date": "",
     "countdown_time": "", "countdown_label": "",
     "show_todo": False, "todo_title": "", "todo_items": [],
+    # The weather block: shown once it is switched on and has a place. The
+    # place is {"name", "lat", "lon"}: the window finds it by name, and the
+    # numbers are all the service ever uses (see clean_place).
+    "show_weather": False, "weather_place": None, "weather_unit": "c",
+    "weather_forecast": True, "weather_plain_icons": False,
 }
-EXTRA_BLOCKS = ("note", "countdown", "todo")
-for _block, _align in zip(EXTRA_BLOCKS, ("center", "center", "left")):
+EXTRA_BLOCKS = ("weather", "note", "countdown", "todo")
+for _block, _align in zip(EXTRA_BLOCKS, ("center", "center", "center", "left")):
     DEFAULT_LOOK.update({f"{_block}_size": None, f"{_block}_color": "#ffffff",
                          f"{_block}_align": _align, f"{_block}_pos": None,
                          f"{_block}_frost": True})
@@ -388,6 +394,27 @@ def _clean_extras(raw, look):
     items = raw.get("todo_items")
     if isinstance(items, list):
         look["todo_items"] = _clean_todo(items)
+    if "weather_place" in raw:
+        look["weather_place"] = clean_place(raw["weather_place"])
+    if raw.get("weather_unit") in ("c", "f"):
+        look["weather_unit"] = raw["weather_unit"]
+    for key in ("weather_forecast", "weather_plain_icons"):
+        if isinstance(raw.get(key), bool):
+            look[key] = raw[key]
+
+
+def clean_place(raw):
+    """A valid weather place from `raw`, or None: a name (for the window) and
+    where it is. The position is kept to two decimal places, about a
+    kilometre: close enough for the weather, and no closer than that is sent
+    to the weather service."""
+    if not isinstance(raw, dict):
+        return None
+    name = _text(raw.get("name"), MAX_PLACE_NAME)
+    lat, lon = _number(raw.get("lat"), -90.0, 90.0), _number(raw.get("lon"), -180.0, 180.0)
+    if name is None or not name.strip() or lat is None or lon is None:
+        return None
+    return {"name": name.strip(), "lat": round(lat, 2), "lon": round(lon, 2)}
 
 
 def _date(value, fmt):
@@ -552,10 +579,19 @@ def _extras_argv(look):
         if look["calendar_size"]:
             argv.append(f"--calendar-size={look['calendar_size']}")
     shown = {
+        "weather": look["show_weather"] and look["weather_place"],
         "note": look["show_note"] and look["note_text"].strip(),
         "countdown": look["show_countdown"] and look["countdown_date"],
         "todo": look["show_todo"] and (look["todo_items"] or look["todo_title"]),
     }
+    if shown["weather"]:
+        place = look["weather_place"]
+        argv += [f"--weather={place['lat']},{place['lon']}",
+                 f"--weather-unit={look['weather_unit']}"]
+        if not look["weather_forecast"]:
+            argv.append("--weather-today-only")
+        if look["weather_plain_icons"]:
+            argv.append("--weather-plain-icons")
     if shown["note"]:
         argv += [f"--note-line={line}" for line in look["note_text"].split("\n")]
     if shown["countdown"]:

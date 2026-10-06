@@ -55,6 +55,7 @@ import psutil
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 import video_win
+import weather_win
 from lcd_win import (FIT_MODES, MAGIC, MAX_PIXELS, MAX_ZOOM, Panel, fit_frame,
                      fit_size, install_handlers, load_frames)
 
@@ -680,11 +681,34 @@ class Shape:
                                    outline="black", width=1)
 
 
+class Stamp:
+    """A small picture with its own transparency, laid over the frame: a
+    weather icon (weather_win.icon), which brings its own black edge."""
+
+    def __init__(self, image, x, y):
+        self.image, self.x, self.y = image, x, y
+
+    def paste(self, img):
+        # Only the part that is on the frame: a block too tall for the screen
+        # may run off it.
+        x0, y0 = max(0, self.x), max(0, self.y)
+        x1 = min(img.width, self.x + self.image.width)
+        y1 = min(img.height, self.y + self.image.height)
+        if x1 <= x0 or y1 <= y0:
+            return
+        part = self.image.crop((x0 - self.x, y0 - self.y, x1 - self.x, y1 - self.y))
+        if img.mode == "RGBA":
+            # The text layer of a video (text_bands): keep its transparency.
+            img.alpha_composite(part, (x0, y0))
+        else:
+            img.paste(part, (x0, y0), part)
+
+
 def compose(frame, items, panels=(), blur=6, darken=0.5, corner=24):
     """Frost each panel box and draw the text over it, the right way up.
 
     This is what --preview saves: the panel's picture without the 180 degree
-    flip that makes it readable in the case. Each item is a Shape or
+    flip that makes it readable in the case. Each item is a Shape, a Stamp or
     (text, font, x, y, anchor, colour), optionally with a seventh element,
     False, for text drawn without its black outline.
     """
@@ -695,6 +719,9 @@ def compose(frame, items, panels=(), blur=6, darken=0.5, corner=24):
     for item in items:
         if isinstance(item, Shape):
             item.draw(draw)
+            continue
+        if isinstance(item, Stamp):
+            item.paste(img)
             continue
         text, font, x, y, anchor, fill = item[:6]
         outline = item[6] if len(item) > 6 else True
@@ -762,11 +789,12 @@ def encode_with(frame, size, bands, quality):
 
 
 BLOCK_GAP = 12                      # between blocks stacked automatically
-EXTRA_BLOCKS = ("note", "countdown", "todo")    # in their stacking order
+EXTRA_BLOCKS = ("weather", "note", "countdown", "todo")     # in their stacking order
 ALIGN = {"left": "la", "center": "ma", "right": "ra"}
 WEEKDAY_LETTERS = "MTWTFSS"         # Monday first
 COUNTDOWN_MODES = ("to", "to-hours", "since")
 DONE_SHADE = 0.55                   # how bright a ticked to-do item stays
+WEATHER_SHADE = 0.6                 # and the weather block's lesser figures (the lows)
 
 
 def wrap(text, font, width):
@@ -835,6 +863,41 @@ def countdown_text(mode, target, label, now):
     return None, None
 
 
+def _weather_fonts(path, size):
+    """The weather block's fonts at text size `size`: for the temperature, for
+    its lines of text, and for the figures under each day."""
+    return _font(path, round(size * 2.125)), _font(path, size), _font(path, max(8, size - 1))
+
+
+@functools.lru_cache(maxsize=64)
+def _weather_size(path, avail, unit, days, start):
+    """Largest text size at or below `start` at which the weather block is no
+    wider than `avail`, whatever the weather: sized, like the stats, against
+    the widest it could ever have to show."""
+    figures = ("-88", "188") if unit == "f" else ("-88",)
+
+    def fits(size):
+        temp, line, small = _weather_fonts(path, size)
+        beside = max([temp.getlength(f"{n}°{unit.upper()}") for n in figures]
+                     + [line.getlength(f"H {n}°  L {n}°") for n in figures]
+                     + [line.getlength(text) for text in weather_win.TEXTS])
+        if 4 * size + round(size * 0.75) + beside > avail:
+            return False
+        return not days or all(max(small.getlength(f"{n}° {n}°"), line.getlength("Wed"))
+                               <= avail / days - 4 for n in figures)
+
+    if fits(start):
+        return start
+    low, high = 8, start
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits(mid):
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
 def calendar_weeks(style, week_start, today):
     """The calendar's content for `today`: (header or None, weekday letters,
     weeks), each week seven cells of (date, faint) or None for a blank.
@@ -858,18 +921,26 @@ class Layout:
     Two kinds of content:
       items()  the clock, the date and the stats, which change as it runs;
                drawn once per change and laid over each frame (text_bands)
-      static   the text, countdown and to-do blocks and the calendar, which
-               only change at a known moment (`valid_until`); drawn into the
-               frames once, when they are prepared
+      static   the weather, text, countdown and to-do blocks and the calendar,
+               which only change at a known moment (`valid_until`); drawn
+               into the frames once, when they are prepared
 
     It also records every block's box, how large each kind of text could grow
     (`limits`), and where each block sits as a share of the height it can move
     through (`positions`) -- what the app's sliders and dragging use.
+
+    The weather block shows the latest reading there is (weather_win.latest;
+    fetching one is never done here), or `reading` when one is given, as a
+    preview's example is.
     """
 
-    def __init__(self, args, w, h, rows, labels, now=None):
+    def __init__(self, args, w, h, rows, labels, now=None, reading=None):
         now = now or datetime.datetime.now()
         self.w, self.h, self.rows, self.labels = w, h, rows, labels
+        self.reading = reading
+        # With the weather block on: (place, unit, days, what it shows), and
+        # when the next reading is due (see weather_kept).
+        self.weather, self.weather_due = None, None
         self.show_time, self.show_date = not args.no_time, not args.no_date
         self.colors = {"time": args.time_color, "date": args.date_color,
                        "label": args.label_color, "value": args.value_color}
@@ -990,7 +1061,8 @@ class Layout:
             box for box in (self.clock_box, self.stats_box) if box]
 
         # The extra blocks, stacked under the clock unless moved.
-        builders = {"note": self._note, "countdown": self._countdown, "todo": self._todo}
+        builders = {"weather": self._weather, "note": self._note,
+                    "countdown": self._countdown, "todo": self._todo}
         stack = (self.clock_box[3] if self.clock_box else inset - BLOCK_GAP) + BLOCK_GAP
         for name in EXTRA_BLOCKS:
             content_h, draw, change = builders[name](args, path, avail, align_x, now)
@@ -1012,12 +1084,84 @@ class Layout:
             if not args.no_frost and not getattr(args, f"{name}_no_frost"):
                 self.panels.append(box)
 
-        # When the static content goes out of date, as epoch seconds.
-        self.valid_until = min(changes).timestamp() if changes else None
+        # When the static content goes out of date, as epoch seconds: at a
+        # moment known beforehand (static_until), or sooner, when the weather
+        # is due another look.
+        self.static_until = min(changes).timestamp() if changes else None
+        times = [t for t in (self.static_until, self.weather_due) if t is not None]
+        self.valid_until = min(times) if times else None
 
     def _place(self, name, box, pos):
         self.boxes[name] = box
         self.positions[name] = min(1.0, max(0.0, pos))
+
+    def _weather(self, args, path, avail, align_x, now):
+        """(height, draw(top), when it changes) for the weather block: today's
+        icon with the temperature, the conditions and the day's high and low
+        beside it, and under them the days that follow, an icon each.
+
+        Without a reading it is drawn all the same, with dashes, so the blocks
+        under it stay where they are when one arrives."""
+        if not args.weather:
+            return 0, None, None
+        place, unit = args.weather, args.weather_unit
+        days = 0 if args.weather_today_only else weather_win.FORECAST_DAYS
+        stamp = now.timestamp()
+        reading = self.reading
+        if reading is None:
+            reading = weather_win.latest(place, unit, stamp)
+            # Never 0: an unset valid_until means "nothing to wait for".
+            self.weather_due = weather_win.due(place, unit) or stamp
+        view = weather_win.view(reading, unit, days, stamp)
+        self.weather = (place, unit, days, view)
+
+        self.limits["weather"] = _weather_size(path, avail, unit, days, 60)
+        size = self.sizes["weather"] = _weather_size(path, avail, unit, days,
+                                                     args.weather_size or self.w // 20)
+        temp_font, line_font, small_font = _weather_fonts(path, size)
+        color = args.weather_color
+        faint = tuple(round(c * WEATHER_SHADE) for c in color)
+        icon_color = color if args.weather_plain_icons else None    # None: their own
+        big, small, gap = 4 * size, round(size * 2.5), round(size * 0.75)
+        text_y = round(temp_font.size * 1.12)
+        range_y = text_y + round(size * 1.3)
+        today_h = max(big, range_y + size)
+        name_h = round(size * 1.3)
+        figures_y = name_h + small + round(size * 0.375)
+        height = today_h + (size + figures_y + small_font.size if days else 0)
+        span = f"H {view.high}  L {view.low}"
+        group = big + gap + max(temp_font.getlength(view.temp), line_font.getlength(view.text),
+                                line_font.getlength(span))
+        align = args.weather_align
+        x0 = round(self.col_left if align == "left" else
+                   self.col_right - group if align == "right" else self.w / 2 - group / 2)
+
+        def icon(kind, night, px, x, y):
+            # No reading: a plain cloud, dimmed.
+            image = (weather_win.icon("cloudy", px, False, faint) if kind is None
+                     else weather_win.icon(kind, px, night, icon_color))
+            return Stamp(image, x, y)
+
+        def draw(top):
+            tx = x0 + big + gap
+            out = [icon(view.kind, view.night, big, x0, top + (today_h - big) // 2),
+                   (view.temp, temp_font, tx, top, "la", color),
+                   (view.text, line_font, tx, top + text_y, "la", color),
+                   (span, line_font, tx, top + range_y, "la", faint)]
+            y = top + today_h + size
+            column = avail / max(1, days)
+            half = small_font.getlength(" ") / 2
+            for i, (name, kind, high, low) in enumerate(view.days):
+                x = round(self.col_left + column * (i + 0.5))
+                out += [(name, line_font, x, y, "ma", color),
+                        icon(kind, False, small, x - small // 2, y + name_h),
+                        (high, small_font, x - half, y + figures_y, "ra", color),
+                        (low, small_font, x + half, y + figures_y, "la", faint)]
+            return out
+
+        # At the place's midnight every day moves on; a new reading is looked
+        # for sooner than that (weather_due).
+        return height, draw, datetime.datetime.fromtimestamp(weather_win.next_day(reading, stamp))
 
     def _calendar(self, args, path, avail, now):
         """(height, draw(top)) for the calendar."""
@@ -1258,6 +1402,18 @@ def _when(text):
                                      "or 2026-12-25T18:30")
 
 
+def _latlon(text):
+    """--weather 51.51,-0.13 -> (51.51, -0.13)."""
+    try:
+        lat, lon = (float(part) for part in text.split(","))
+    except ValueError:
+        lat = lon = None
+    if lat is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not LATITUDE,LONGITUDE (for example 51.51,-0.13)")
+    return lat, lon
+
+
 def _brightness(text):
     value = int(text)
     if not 10 <= value <= 100:
@@ -1402,7 +1558,19 @@ def build_parser():
     ap.add_argument("--todo-item", action="append", default=[], metavar="TEXT",
                     help='a to-do item; start it with "[x] " when it is done. '
                          "Repeat for more")
-    for block, align in (("note", "center"), ("countdown", "center"), ("todo", "left")):
+    ap.add_argument("--weather", type=_latlon, metavar="LATITUDE,LONGITUDE",
+                    help="show the weather at this place, e.g. 51.51,-0.13: now, "
+                         "today's high and low, and the next three days. Read from "
+                         "Open-Meteo every 15 minutes (the place is sent to it). "
+                         "South of the equator, write --weather=-33.87,151.21")
+    ap.add_argument("--weather-unit", choices=("c", "f"), default="c",
+                    help="Celsius (the default) or Fahrenheit")
+    ap.add_argument("--weather-today-only", action="store_true",
+                    help="leave the next three days out")
+    ap.add_argument("--weather-plain-icons", action="store_true",
+                    help="draw the weather icons in the block's colour, not their own")
+    for block, align in (("weather", "center"), ("note", "center"), ("countdown", "center"),
+                         ("todo", "left")):
         ap.add_argument(f"--{block}-size", type=int, default=0)
         ap.add_argument(f"--{block}-color", type=ImageColor.getrgb, default="white")
         ap.add_argument(f"--{block}-align", choices=ALIGN, default=align)
@@ -1513,7 +1681,8 @@ def preview(argv, picture=None, video=False):
     args = build_parser().parse_args(argv)
     frame = _frames(args, limit=1, picture=picture)[0]
     rows, labels = _stats_setup(args)
-    layout = Layout(args, frame.width, frame.height, rows, labels)
+    layout = Layout(args, frame.width, frame.height, rows, labels,
+                    reading=weather_win.example(args.weather_unit) if args.weather else None)
     stats = SampleMetrics([name for row in rows for name in row])
     items = layout.static + layout.items(layout.clock(), stats.values())
     return _compose_frame(frame, layout, args, items, video or _is_clip(args.source)), layout
@@ -1680,10 +1849,11 @@ class TextLayer:
 
     def _update(self):
         show = self.show
+        layout = show.layout            # a new one when the weather changes (relayout)
         clock, vals = show.tick()
-        stamp = clock + vals
+        stamp = (layout, clock, vals)
         if stamp != self._stamp:
-            items = show.layout.static + show.layout.items(clock, vals)
+            items = layout.static + layout.items(clock, vals)
             self.bands = text_bands(items, show.size, show.args.brightness)
             self._stamp = stamp
 
@@ -1731,6 +1901,17 @@ class VideoShow:
     def tick(self):
         return self.layout.clock(), self.stats.values() if self.stats else ()
 
+    def relayout(self):
+        """Draw the blocks afresh without touching the clip: for a change in
+        the weather. A clip's blocks are not in its pictures (see TextLayer),
+        so it can go on playing where it is, where a new VideoShow would
+        start it again from the beginning. Only for a change that leaves
+        every block where it was, as the weather's does."""
+        w, h = self.size
+        rows, labels = _stats_setup(self.args)
+        self.layout = Layout(self.args, w, h, rows, labels)
+        self.valid_until = self.layout.valid_until
+
     def describe(self, port):
         w, h = self.size
         layout = self.layout
@@ -1747,14 +1928,53 @@ class VideoShow:
             self.stats.close()
 
 
-def make_show(args, log, get_temps=None):
-    """The Show for what args.source is: a video clip, or a picture or GIF."""
+def make_show(args, log, get_temps=None, fetch=True):
+    """The Show for what args.source is: a video clip, or a picture or GIF.
+
+    If it shows the weather and a reading is due, that is fetched first, which
+    can take some seconds: fine while another show plays, as it does whenever
+    settings change. The very first show must not keep the screen waiting, so
+    it is made with `fetch` off, and gets its reading in its first refresh
+    (weather_kept).
+    """
+    if fetch and args.weather:
+        weather_win.refresh(args.weather, args.weather_unit, log)
     if _is_clip(args.source):
         try:
             return VideoShow(args, log, get_temps)
         except video_win.VideoError as e:
             raise SystemExit(str(e)) from None
     return Show(args, log, get_temps)
+
+
+def weather_kept(show, log=None):
+    """Call when `show` has gone out of date, before making another: fetches
+    the weather if a reading is due, and says whether `show` can stay.
+
+    It can when the weather was all it was waiting for and the block still
+    reads the same (the temperature rounds to the same degree, say): `show`
+    is then good until the next reading is due, and no frame has to be
+    prepared again. A video stays even when the weather has changed: its
+    blocks are drawn afresh (VideoShow.relayout) and the clip plays on,
+    rather than starting again. Fetching can take some seconds, so this is
+    for a background thread, never the display loop.
+    """
+    layout = show.layout
+    if layout.weather is None:
+        return False
+    place, unit, days, seen = layout.weather
+    weather_win.refresh(place, unit, log)
+    now = time.time()
+    if layout.static_until is not None and now >= layout.static_until:
+        return False
+    if weather_win.view(weather_win.latest(place, unit, now), unit, days, now) != seen:
+        if show.kind != "video":
+            return False
+        show.relayout()
+        return True
+    due = max(weather_win.due(place, unit), now + Player.STALE_RETRY)
+    show.valid_until = due if layout.static_until is None else min(due, layout.static_until)
+    return True
 
 
 class Player:
@@ -1917,7 +2137,7 @@ def main(argv=None, stop=None, log=None):
         _write_preview(args, log)
         return
 
-    show = make_show(args, log)
+    show = make_show(args, log, fetch=False)
     try:
         panel = Panel(args.port)
     except BaseException:
@@ -1931,9 +2151,12 @@ def main(argv=None, stop=None, log=None):
     log(show.describe(panel.port))
 
     def rebuild():
-        """At midnight (or a countdown's next change): fresh static blocks."""
+        """At midnight (or a countdown's next change, or when the weather has
+        changed): fresh static blocks."""
         def build():
             try:
+                if weather_kept(player.show, log):
+                    return
                 player.swap(make_show(args, log))
             except (SystemExit, Exception) as e:
                 log(f"could not refresh the blocks: {e}")
@@ -1954,7 +2177,12 @@ def _write_preview(args, log):
     if w * h > MAX_PIXELS:
         sys.exit(f"{w}x{h} is {w * h:,} px, over the {MAX_PIXELS:,} px limit")
     rows, labels = _stats_setup(args)
-    layout = Layout(args, w, h, rows, labels)
+    reading = None
+    if args.weather and args.sample_stats:
+        reading = weather_win.example(args.weather_unit)
+    elif args.weather:
+        weather_win.refresh(args.weather, args.weather_unit, log)
+    layout = Layout(args, w, h, rows, labels, reading=reading)
     slots = [name for row in rows for name in row]
     stats = (None if not slots else
              SampleMetrics(slots) if args.sample_stats else Metrics(slots))

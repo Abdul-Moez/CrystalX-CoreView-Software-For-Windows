@@ -183,6 +183,14 @@ def main(app_folder):
         "",
     ]
     summary += ffmpeg_notices(out)
+    summary += [
+        "Weather data",
+        "-" * 12,
+        "Nothing is bundled for it: while its block is switched on, the app reads",
+        "the weather from Open-Meteo (https://open-meteo.com/), whose data is",
+        "licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).",
+        "",
+    ]
     with open(os.path.join(out, "THIRD-PARTY-NOTICES.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(summary))
     print(f"wrote {len(COMPONENTS)} licences and {len(FFMPEG_PARTS)} of FFmpeg's to {out}")

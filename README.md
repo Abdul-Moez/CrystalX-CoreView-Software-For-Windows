@@ -1,8 +1,8 @@
 # CrystalX CoreView LCD for Windows
 
-Show your own pictures, GIFs or videos with a clock, the date and live PC
-stats (CPU and GPU usage and temperature, RAM, drives, network) on the LCD
-screen of a **CrystalX CoreView V-950** PC case — without the vendor's LCD
+Show your own pictures, GIFs or videos with a clock, the date, the weather and
+live PC stats (CPU and GPU usage and temperature, RAM, drives, network) on the
+LCD screen of a **CrystalX CoreView V-950** PC case — without the vendor's LCD
 Control app.
 
 This is an unofficial project. It is not made by or affiliated with CrystalX or
@@ -144,9 +144,27 @@ Below it are six tabs:
     CPU temperature can turn orange at 75°C and red at 90°C, for example.
     You can pick the two colours too.
 - **Extras** — things of your own to add, each switched on separately. The
-  text, the countdown and the to-do list each have their own size, colour,
-  alignment (left, centre or right), frosted panel on or off and height on the
-  screen (or drag them in the preview):
+  weather, the text, the countdown and the to-do list each have their own
+  size, colour, alignment (left, centre or right), frosted panel on or off and
+  height on the screen (or drag them in the preview):
+  - **Weather** — the temperature now with a picture of the conditions,
+    today's high and low and, under them, the next three days. It sits right
+    under the clock unless you move it.
+    1. Tick **Show the weather**.
+    2. Type your city in **Find** and click **Search**.
+    3. Pick it from the **City** list. Places with the same name show their
+       region and country, so you can tell them apart.
+
+    Then choose **Celsius** or **Fahrenheit**, **Today and 3 days** or **Today
+    only**, and whether the pictures keep their own colours or take the
+    block's colour. The preview shows example weather, like its example
+    readings.
+
+    The weather comes from [Open-Meteo](https://open-meteo.com/) and is read
+    again every 15 minutes, so it needs an internet connection; until a
+    reading arrives the block shows `--`. To get it, the app sends Open-Meteo
+    where your city is, to about a kilometre. Nothing is sent while the
+    weather is switched off, and nothing else in the app uses the internet.
   - **Text** — anything you like: a quote, a reminder, your name. Long lines
     wrap.
   - **Countdown** — days to a date (*12 days to Launch*, then *Launch is
@@ -180,8 +198,8 @@ long as the new one takes to prepare, then switches.
 
 **Reset to defaults** puts the look back as it came, but keeps your playlist
 (the pictures and videos, and how each is placed and timed) and what you
-wrote (the text, the countdown and the to-do list — their blocks are just
-switched off).
+wrote or chose (the text, the countdown, the to-do list, and your city and
+unit for the weather — their blocks are just switched off).
 **Undo changes** goes back to what's on the screen now.
 
 **Open log** shows what the app has been doing — useful if something goes
@@ -293,6 +311,21 @@ PawnIO), or install it from **https://pawnio.eu/**.
 That reading isn't available on your PC (for example, no GPU counters), or the
 display has only just started — speed readings need two samples.
 
+**The weather shows `--` and "No reading yet"**
+The app hasn't been able to get the weather. Right after the PC starts this
+is normal for a minute, until the internet connection is up. If it stays,
+check the connection, and that a firewall isn't blocking **CrystalX LCD
+service** from reaching `api.open-meteo.com`. It tries again by itself; **Open
+log** shows the reason on a line starting `weather:`.
+
+**"Could not search: …"** (when looking for your city)
+The app couldn't reach Open-Meteo's place search. Check the internet
+connection and click **Search** again.
+
+**"No place found by that name"**
+Check the spelling, or search for the nearest larger town: the weather there
+will be the same.
+
 **"That video is … minutes long"** (when adding a video)
 The screen takes videos up to 5 minutes long. Cut it shorter first (the
 Photos app or Clipchamp that come with Windows can), then add the shorter file.
@@ -365,6 +398,10 @@ commercial purposes, as long as:
 
 The [LICENSE](LICENSE) file is the legally binding text; this summary is only a
 guide.
+
+**Weather data** by [Open-Meteo.com](https://open-meteo.com/), under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The app asks
+Open-Meteo directly from your PC; no account or key is involved.
 
 The app bundles other open-source components, each under its own license —
 among them FFmpeg, which reads and plays the videos. See the `licenses` folder

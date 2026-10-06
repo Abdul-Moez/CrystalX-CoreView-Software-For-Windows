@@ -83,6 +83,21 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
   Reset to defaults only. A saved file keeps the formats it names, a v1.0
   file that names none keeps the old ones (`LEGACY_FORMATS`), and the scripts'
   own defaults in `clock_win.py` stay as they were.
+- **Weather.** Read "Weather" in `docs/HOW-IT-WORKS.md` before touching
+  `weather_win.py`. It is the only code that uses the network, and the
+  service does it as SYSTEM, so keep every rule in that section's table. In
+  particular: one fixed HTTPS host and no redirects; every value from a reply
+  checked; the service is only ever given a latitude and longitude
+  (`clean_place`), never a name or an address to look up; the name search
+  runs in the window, and only when Search is pressed. A reading is fetched
+  in the background and never before the first frame (`make_show(...,
+  fetch=False)`, then `weather_kept`); the window's preview never fetches (it
+  shows `weather_win.example`). **Every 15 minutes, with no setting**: the
+  user chose that, and Open-Meteo's data changes no faster. Keep the network
+  modules imported inside `_get`, so a display without the block never loads
+  them. The icons were approved by the user as they are drawn: don't change
+  their shapes unless asked, and compare each one before and after any change
+  to the drawing code.
 - **Video.** A video is converted once, by the window, into a clip
   (`video_win`); the service plays clips with FFmpeg's H.264 decoder only.
   Read "Video" in `docs/HOW-IT-WORKS.md` before touching it. In particular:
@@ -99,7 +114,8 @@ See "The app: service, window and installer" in `docs/HOW-IT-WORKS.md`.
   this). No is the default; a silent uninstall keeps them, and the `media`
   folder with them, since that is where their pictures and videos are.
 - **Reset to defaults keeps what the user chose or wrote** (`CONTENT_KEYS` in
-  `tray_win.py`: the playlist, the text, the countdown, the to-do list).
+  `tray_win.py`: the playlist, the text, the countdown, the to-do list, the
+  weather's city and unit).
   To-do ticks and removals reach the screen at once through the service's
   `todo` command; adding and editing items waits for Apply.
 - **Releases:** the version lives only in `VERSION` in `ipc_win.py`. Bump it,
@@ -123,11 +139,16 @@ the user asked for both to be as light as possible. See "Performance" in
   is drawn once per change (`text_bands`), not once per frame. Don't move work
   back into the loop.
 - **Content that changes at a known moment is drawn into the frames**, not
-  per frame: the text, countdown and to-do blocks and the calendar go in
-  `Layout.static`, and `Layout.valid_until` says when they go out of date
-  (midnight, or the countdown's next hour); the player then rebuilds the Show
-  in the background. Only the clock, the date and the stats are drawn as the
-  loop runs.
+  per frame: the weather, text, countdown and to-do blocks and the calendar go
+  in `Layout.static`, and `Layout.valid_until` says when they go out of date
+  (midnight, the countdown's next hour, or when the next weather reading is
+  due); the player then rebuilds the Show in the background. Only the clock,
+  the date and the stats are drawn as the loop runs.
+- **A weather reading that changes nothing on the screen rebuilds nothing.**
+  `clock_win.weather_kept` compares what the block would show with what it
+  shows, and keeps the Show when they are the same. Don't rebuild on every
+  reading: with a long GIF that is seconds of work, four times an hour, for
+  an identical picture.
 - **Never stop the loop to change settings.** Build a new `clock_win.Show`
   while the old one plays and hand it over with `Player.swap` (the service's
   `Display._rebuild`). Stopping the loop froze the screen for ~2 s in v1.1.0.
@@ -143,10 +164,12 @@ the user asked for both to be as light as possible. See "Performance" in
   frost it needs. Keep the two apart. FFmpeg is imported only where a video is
   used (`video_win._av`), so a service showing pictures never loads it, and
   `video_win` imports nothing heavy at the top. With one playlist item and no
-  rotation, no extra thread runs.
+  rotation, no extra thread runs. The weather block adds none either: its
+  reading is fetched by the short-lived thread that would rebuild the Show.
 - **Hidden, the window app does nothing but keep the tray tooltip current**: no
   redraws, no settings or layout reads, no preview picture held, no helper
-  process (`MainWindow.release`). The font list is read only when the Style
+  process (`MainWindow.release`), and nothing on the network, ever (shown, only
+  the weather's city search, when its button is pressed). The font list is read only when the Style
   tab is opened. The preview never plays by itself.
 - **Measure before and after** any change to the loop, with frames going to a
   stand-in panel rather than the real one (see "Performance"), and compare
@@ -209,7 +232,15 @@ the user asked for both to be as light as possible. See "Performance" in
   fixed clock and example readings, and compare a hash of every prepared
   frame and of a few finished JPEGs. v1.3 was checked this way against v1.2
   on the rooftop GIF (default, everything switched on, one column without
-  frost), a 300-frame GIF and three stills: identical.
+  frost), a 300-frame GIF and three stills: identical. So was v1.5 against
+  v1.4, with the weather block off.
+- **Weather tests use a stand-in for Open-Meteo**: replace `weather_win.fetch`
+  and `weather_win.search`. One live request is enough to show the path
+  works; never loop on the real service. To test the refresh without waiting
+  15 minutes, shorten `REFRESH`, `RETRY` and `Player.STALE_RETRY` together,
+  and keep `STALE_RETRY` longer than a Show takes to build: shorter, the
+  player reports the show stale again while its replacement is still being
+  made, shows get built twice, and the test misleads.
 - Windows reads a `.cmd` file line by line while it runs. Don't edit
   `run-clock.cmd` or `run-gif.cmd` while a copy of it is running.
 - Measure before optimising, and check what a measurement actually means —

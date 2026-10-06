@@ -601,7 +601,9 @@ class Display:
     pauses the screen: the new look is built (clock_win.Show) in the background
     while the old one keeps playing, then swapped in (Player.swap). The same
     happens by itself at midnight, when the calendar or a countdown needs
-    redrawing, and whenever a playlist item has run its course: the next one is
+    redrawing, when the weather has changed (it is read in the background,
+    at most every 15 minutes, and only while its block is shown), and
+    whenever a playlist item has run its course: the next one is
     made a little before it is due and swapped in at the moment. When saved
     layouts rotate, the same happens with the first item of the next layout.
     While the panel is busy or unplugged, it retries every few seconds.
@@ -669,24 +671,25 @@ class Display:
         self.items, self.order = self._order(config)
         self.pos = self.order.index(keep) if keep in self.order else 0
 
-    def _build(self, config, items, item_id):
+    def _build(self, config, items, item_id, fetch=True):
         item = items[item_id]
         args = clock_win.build_parser().parse_args(engine_argv(look_of(config), item))
-        show = clock_win.make_show(args, self._log, self._get_temps)
+        show = clock_win.make_show(args, self._log, self._get_temps, fetch)
         show.item_id, show.pending, show.ends_at = item_id, None, None
         return show
 
-    def _make_show(self, config, items, order, start):
+    def _make_show(self, config, items, order, start, fetch=True):
         """The show for position `start` of `order`, or the next one that can
         be made if that one can't (a file that has gone, a damaged clip): one
-        bad item must not stop the rest of the playlist."""
+        bad item must not stop the rest of the playlist. `fetch` off makes it
+        without waiting for the weather (see clock_win.make_show)."""
         last = None
         for step in range(len(order)):
             item = items[order[(start + step) % len(order)]]
             if item["file"] in self.guard.suspects or item["file"] in self.failed:
                 continue
             try:
-                return self._build(config, items, item["id"])
+                return self._build(config, items, item["id"], fetch)
             except SystemExit as e:
                 log.warning("leaving out %s: %s", item["label"], e.code)
                 last = e
@@ -863,9 +866,20 @@ class Display:
     # -- changing the settings -------------------------------------------------------
 
     def _stale(self):
-        """Something in the picture is out of date (midnight): rebuild what is
-        playing, and carry on from the same item."""
-        self.reload(keep=True)
+        """Something in the picture is out of date (midnight, or the weather
+        is due another look): rebuild what is playing, and carry on from the
+        same item -- unless the weather was all, and the show can stay (see
+        clock_win.weather_kept)."""
+        threading.Thread(target=self._refresh, name="rebuild", daemon=True).start()
+
+    def _refresh(self):
+        player = self.player
+        try:
+            if player is not None and clock_win.weather_kept(player.show, self._log):
+                return
+        except Exception:
+            log.exception("the weather could not be looked at; rebuilding")
+        self._rebuild(True)
 
     def reload(self, keep=False):
         """New settings (or the midnight refresh): build them in the
@@ -908,7 +922,9 @@ class Display:
             show = panel = None
             try:
                 self._plan(load_config())
-                show = self._make_show(self.config, self.items, self.order, 0)
+                # Without waiting for the weather: the screen comes up at once,
+                # and the first reading follows in the background (_stale).
+                show = self._make_show(self.config, self.items, self.order, 0, fetch=False)
                 panel = clock_win.Panel()
                 self._log(show.describe(panel.port))
                 self.player = clock_win.Player(panel, show, on_stale=self._stale,

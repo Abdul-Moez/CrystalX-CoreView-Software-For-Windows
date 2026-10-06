@@ -45,7 +45,7 @@ import win32pipe
 # The one place the version lives. The installer, the programs' file
 # properties and the About box all read it; the release build checks that
 # the git tag (v1.0.0) matches.
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 SERVICE_NAME = "CrystalXLCD"
 DISPLAY_NAME = "CrystalX LCD"

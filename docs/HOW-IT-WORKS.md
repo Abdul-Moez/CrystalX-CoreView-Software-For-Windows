@@ -19,6 +19,7 @@ quirks. They are written down so nobody has to rediscover them.
 - [Command-line options](#command-line-options)
 - [Stats slots](#stats-slots)
 - [Temperatures](#temperatures)
+- [Weather](#weather)
 - [Video](#video)
 - [The app: service, window and installer](#the-app-service-window-and-installer)
 - [Making a release](#making-a-release)
@@ -288,6 +289,7 @@ Inspected on 2026-09-29, LCD Control version 1.0.0.47 (.NET Framework 4.8).
 | `clock_win.py` | Overlay player: picture, GIF or video clip + clock + date + configurable stats. The service plays its `Show` / `VideoShow` and `Player`, the same ones `main()` uses, and its `preview()` draws the app's preview. |
 | `video_win.py` | Video: converts a video file into a clip the panel can be fed from (`convert`), plays a clip back (`ClipReader`), and is the helper process the window uses for both. See [Video](#video). |
 | `temps_win.py` | CPU and GPU temperatures through LibreHardwareMonitor; starts the PawnIO driver when needed |
+| `weather_win.py` | The weather block's readings, from Open-Meteo, and its icons, drawn in code. The only part that uses the network. See [Weather](#weather). |
 | `lib/LibreHardwareMonitor/` | The unmodified LibreHardwareMonitor 0.9.6 DLLs, their licenses, and `THIRD-PARTY-NOTICES.md` with sources and checksums |
 | `retro_pixel_guy_smoking_on_rooftop.gif` | The default picture |
 | **The app** | |
@@ -363,7 +365,8 @@ because its placement was decided when it was converted.
 | `--note-line TEXT` (repeatable) | Your own text, one option per line; long lines wrap |
 | `--countdown-date YYYY-MM-DD[THH:MM]`, `--countdown-mode to\|to-hours\|since`, `--countdown-label` | A countdown to (or count-up from) a date — see [The extra blocks](#the-extra-blocks) |
 | `--todo-title`, `--todo-item "[x] TEXT"` (repeatable) | A to-do list; items starting `[x] ` are done (ticked, crossed out and dimmed) |
-| `--note-…`, `--countdown-…`, `--todo-…` `-size`, `-color`, `-align left\|center\|right`, `-pos 0–1`, `-no-frost` | Each extra block's size, colour, alignment, height and panel |
+| `--weather LATITUDE,LONGITUDE`, `--weather-unit c\|f`, `--weather-today-only`, `--weather-plain-icons` | The weather at that place — see [Weather](#weather). South of the equator, write it with an equals sign: `--weather=-33.87,151.21` |
+| `--weather-…`, `--note-…`, `--countdown-…`, `--todo-…` `-size`, `-color`, `-align left\|center\|right`, `-pos 0–1`, `-no-frost` | Each extra block's size, colour, alignment, height and panel |
 
 **Brightness is done in software.** The panel's backlight has no known
 control: the vendor app's panel class has no brightness command (see
@@ -426,10 +429,10 @@ The app's size sliders stop at exactly these limits (`Layout.limits`).
 
 ### The extra blocks
 
-Besides the clock block and the stats, three blocks can be switched on: your
-own **text**, a **countdown** and a **to-do list**. The clock block can also
-hold a **calendar** (this month, or just this week) under the date or instead
-of it.
+Besides the clock block and the stats, four blocks can be switched on: the
+**weather** (see [Weather](#weather)), your own **text**, a **countdown** and
+a **to-do list**. The clock block can also hold a **calendar** (this month, or
+just this week) under the date or instead of it.
 
 - **Placement.** Unless given a `-pos`, they stack under the clock block in
   that order, 12 px apart (`BLOCK_GAP`); a block that is moved takes the
@@ -446,7 +449,10 @@ of it.
   midnight; a countdown in days and hours changes when the hours figure drops.
   The layout records that moment (`valid_until`); when it comes, the player
   builds the frames afresh in the background and swaps them in, so the new day
-  appears within a couple of seconds, without a pause.
+  appears within a couple of seconds, without a pause. The weather is the one
+  block whose next change is not known beforehand: its moment is when the
+  next reading is due, and the frames are only built afresh if the reading
+  then changes what the block shows.
 
 The countdown reads *12 days to Launch*, then *Launch is today!* on the day,
 and disappears after it (`to`); *12 days 5 h to Launch* (`to-hours`, to a date
@@ -660,6 +666,101 @@ affected: files an installer writes carry no such mark.)
 
 ---
 
+## Weather
+
+The weather block shows the temperature now with an icon for the conditions,
+today's high and low and, under them, the next three days. Everything is in
+`weather_win.py`. The readings are from **[Open-Meteo](https://open-meteo.com/)**:
+no key or account, free for apps without advertising or subscriptions, under
+10,000 requests a day from one address (an install makes 96), data under
+CC BY 4.0 — hence the credit in the window and the README. **It is the only
+part of the project that uses the network.**
+
+### How a reading is fetched
+
+One HTTPS request to `api.open-meteo.com/v1/forecast` for the place's latitude
+and longitude: `current=temperature_2m,weather_code,is_day`, and
+`daily=weather_code,temperature_2m_max,temperature_2m_min` for five days, with
+`timezone=auto`. It uses only Python's own `urllib`, so there is no library to
+add, and Windows' certificate store.
+
+| Rule | Why |
+|---|---|
+| At most one request every 15 minutes (`REFRESH`), and none unless the block is shown | Open-Meteo's current conditions are worked out every 15 minutes, so asking more often returns the same numbers. There is no setting for it |
+| Never from the display loop, and never before the first frame | A request can hang for many seconds (10 for each step, and a slow name lookup on top; 12 s was seen once). The first show is made without waiting (`make_show(..., fetch=False)`) and gets its reading through the same background refresh as every later one |
+| After a failure: again after 1, 2 and 5 minutes, then every 15 (`RETRY`) | The service starts before the network is up; a minute later the weather is there |
+| A reading older than 3 hours is not shown (`MAX_AGE`); the block then reads `--` | Better no weather than old weather passed off as now |
+| The place is two numbers, rounded to two decimal places (about a kilometre) | Close enough for the weather, and no closer than that is sent to anyone |
+| The host is fixed in the code, a redirect is refused, the reply is at most 64 KB and is only ever parsed as JSON; every value taken from it is checked (`_reading`: a number in a sane range, a code from 0 to 99, a date) | The service does this as SYSTEM, so the reply is treated like anything else from outside: untrusted |
+| The city is looked up by name (`search`) in the window only, when **Search** is pressed; the service is given the numbers and never a name to look up | The window runs as the user. The name is kept in the settings only so the window can show it |
+
+The log (`Open log`) gets a line starting `weather:` when readings start
+coming and when they stop, not one for every reading.
+
+### How it reaches the screen
+
+It is drawn like the other extra blocks: into the frames, once, when they are
+prepared (`Layout._weather`, `Layout.static`), with the icons as small
+pictures laid over the frame (`Stamp`). Nothing about it is done per frame.
+
+What is different is when it changes. The layout notes when the next reading
+is due (`weather_due`), and the show goes out of date then (`valid_until`).
+The player reports that as it does midnight, and in the background
+`clock_win.weather_kept` fetches the reading and compares what the block
+would now show with what it shows (`weather_win.view`: the texts and icon
+names, so 14.6° and 15.2° are the same). **Unchanged, the show simply stays**
+until the next reading is due, and no frame is prepared again; changed, a new
+show is built and swapped in like any other change. At the place's midnight
+it is always rebuilt, since every day moves on. (The dates are the place's
+own, from the UTC offset in the reading, not the PC's.)
+
+A video is not swapped for the weather at all, because a new `VideoShow`
+would start the clip again from its beginning, up to four times an hour. A
+clip's blocks are not in its pictures but in the text layer laid over them
+(see [Video](#video)), so only the layout is made afresh
+(`VideoShow.relayout`); the text thread sees the new one and redraws, and the
+clip plays on. That is safe only because the weather block keeps its size:
+every panel stays where it was.
+
+The block is the same height with and without a reading (dashes, and a dimmed
+cloud), so the blocks under it do not jump when the first one arrives. The
+preview in the window never fetches anything: it shows an example reading
+(`weather_win.example`), as it shows example stats.
+
+Its text size sets everything else (the temperature is 2⅛ times it, the big
+icon 4 times, a day's icon 2½ times), and stops at the largest at which the
+widest it could ever show still fits: 18 px with the three days, in the
+default font.
+
+### The icons
+
+Ten conditions (`KINDS`), three of them with a night version, mapped from
+Open-Meteo's WMO weather codes (`CODES`). They are drawn in code, so there is
+no font or picture file to ship or to license: each is a few layers (the sun
+or moon, a cloud, what falls from it), each edged in black like the text's
+outline so that it reads over any picture, drawn four times too large and
+reduced for smooth edges. An icon takes about 16 ms to draw and is then kept
+(`icon` is cached), so a block's four icons are drawn once.
+
+Their shapes were shown to and approved by the maintainer before anything else
+was built. Change the drawing code only if asked to, and compare every icon
+before and after.
+
+### Cost
+
+Measured on the test machine on 2026-10-06, the rooftop GIF with the app's
+default look:
+
+| | Without the block | With it |
+|---|---|---|
+| The 59 frames, packed | 8.7 MB | 10.4 MB |
+| A video's text layer, redrawn whenever the clock or a stat changes | 6.5 ms | 8.6 ms |
+
+What it costs while running, and what a rebuild costs, are in
+[Performance](#performance).
+
+---
+
 ## Video
 
 A video (MP4, MOV, MKV, WEBM, AVI... anything FFmpeg reads), up to 5 minutes,
@@ -846,9 +947,10 @@ what the screen shows. That is the **playlist** — the pictures, GIFs and video
 behind the clock, each with its own placement (fit, zoom and pan) and timing —
 and what is over them: clock and date formats, sizes, colours, positions, the
 seven stat spots, their names and warning colours, font, frosted panel,
-brightness, the calendar, and the text, countdown and to-do blocks with what
-is written in them. Hiding the time, the date, the stats (`show_stats`) or one
-of those blocks keeps its other settings for when it is shown again. The look
+brightness, the calendar, the weather block with its place, and the text,
+countdown and to-do blocks with what is written in them. Hiding the time, the
+date, the stats (`show_stats`) or one of those blocks keeps its other settings
+for when it is shown again. The look
 lives in `config.json`, with one setting beside it that belongs to the app and
 not to any layout: whether saved layouts rotate.
 
@@ -945,6 +1047,7 @@ is kept narrow:
 | `C:\ProgramData\CrystalX LCD` is writable only by SYSTEM and administrators | A user can't plant a picture or settings file for the service to read |
 | Every setting, from the pipe or from a file, goes through `settings_win.clean_look` | Only known keys, types and ranges reach the engine; anything else falls back to its default |
 | Fonts are only taken from `C:\Windows\Fonts`, by file name | The service never opens a path the user chose; fonts installed for one user only are therefore not offered |
+| The service's only use of the network is the weather: one fixed HTTPS host, no redirects, a small reply read as JSON and checked value by value; the place it asks about is two numbers (`clean_place`) | Nothing the window sends can make SYSTEM fetch an address of someone's choosing, and nothing a server sends back is trusted (see [Weather](#weather)) |
 
 **Fitting any picture.** Pictures chosen in the app are placed on a canvas of
 the tested 320 × 1476 frame (`fit_frame`): *fill* crops to cover it, *blur* and
@@ -974,8 +1077,8 @@ runs, only the newest waits.
   every new file, and then the look. All videos are converted before anything
   is sent, so the files reach the service together, just before they are used.
 - **Dragging** on the preview moves a block up or down when grabbed inside
-  its box (the clock, the stats, or the text, countdown or to-do block; from
-  the layout's `boxes`), and the picture anywhere else; the wheel zooms around the
+  its box (the clock, the stats, or the weather, text, countdown or to-do
+  block; from the layout's `boxes`), and the picture anywhere else; the wheel zooms around the
   pointer. The preview works from one picture of the item, kept until another
   is wanted and scaled down to 2048 px at most (placement is in proportions,
   so it looks the same).
@@ -985,6 +1088,10 @@ runs, only the newest waits.
   does.
 - **Size sliders** stop at the largest size that fits (`Layout.limits`);
   sizes and positions left automatic show what the engine chose.
+- **The weather's city** is looked up by name when Search is pressed (the
+  window's only use of the network; see [Weather](#weather)) and picked from
+  the places found, which come with their region and country. What goes into
+  the settings is the place's name and where it is.
 - **The countdown's date and time** are picked, not typed: the date from a
   small calendar window (`DatePicker`, which starts its weeks on the day the
   calendar setting says), the time from lists (`TimeField`) that follow the
@@ -1235,6 +1342,57 @@ while a video is being looked at or converted, and hiding the window ends it.
 The preview plays only when Play is pressed.
 
 **The installer** grew from 21.6 MB to 40.1 MB: FFmpeg.
+
+**v1.5.0** (same machine, 2026-10-06) adds the weather block. With it off,
+what the display sends is byte for byte what v1.4.0 sent (eight cases; see
+`AGENTS.md`, Testing). Rooftop GIF, the app's default look, all seven stats
+with live sensors, three alternating runs of each, 45 seconds after settling:
+
+| | CPU | Frames a second | Text drawn |
+|---|---|---|---|
+| v1.4.0 | 5.2–5.5% of one core | 9.4 | 22–23 times |
+| v1.5.0, weather off | 5.0–5.3% | 9.4–9.5 | 23 times |
+| v1.5.0, weather on | 4.7–5.0% | 9.4 | 23 times |
+
+The three are the same within the spread between runs, and did the same
+work: the block is in the frames, so the loop has nothing more to do, and no
+thread is added (the reading is fetched by the short-lived thread that would
+rebuild the show).
+
+What the block costs is its rebuilds: one when the first reading arrives, and
+one each time a reading changes what the block shows (not on every reading,
+see [Weather](#weather)).
+
+| One rebuild | Without the block | With it |
+|---|---|---|
+| Rooftop GIF, 59 frames | 1.1 s of processor time | 1.4 s |
+| A 300-frame GIF | 4.1 s | 5.4 s |
+| A still picture | 0.02 s | 0.02 s |
+
+While a rebuild runs both sets of frames are held, and not all of that
+memory goes back to Windows afterwards. That was already so for every Apply;
+the weather makes it routine. The service's display, in-process, rooftop GIF:
+
+| | RAM |
+|---|---|
+| Just started, weather off | 85 MB |
+| After settings have been applied a few times, weather off | 105 MB, and it stays there (14 rebuilds) |
+| Weather on, first reading in | 100 MB |
+| Weather on, after 14 more rebuilds | 112 MB, level from the first |
+
+So with the weather on the service settles about 25 MB above a fresh start
+without it, 7 MB above where it ends up anyway once settings have been
+changed. With the longest GIFs each change of weather is several seconds of
+work and, for those seconds, a second set of frames in memory: someone
+showing a 300-frame GIF of photographs (300 MB) would see it double briefly.
+A video is not rebuilt for the weather at all.
+
+**The window** asks for the same size on screen as in v1.4.0 (559 × 741 px),
+has no new work while hidden, and makes no request unless Search is pressed.
+Its CPU and memory were not measured again for this version.
+
+**The installer** is 50 KB bigger than v1.4.0's (42.1 MB): Python's network
+modules and OpenSSL were in it already.
 
 ### Where the display's time goes
 
